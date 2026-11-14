@@ -5,7 +5,7 @@ import { DEMO_SCRIPT, FEATURES, JOURNEY, METRICS, PROBLEM, SITE, TRUST } from '.
 import { useDocumentTitle } from '../lib/storage'
 import { useTracker } from '../lib/tracker'
 import { Header, PageHead, Shell } from '../components/AppShell'
-import { Badge, Reveal, Stat } from '../components/Bits'
+import { Badge, Reveal } from '../components/Bits'
 import { Button, ButtonLink } from '../components/Button'
 import { Card } from '../components/Card'
 import { Accordion } from '../components/Content'
@@ -88,11 +88,23 @@ export function Home() {
           </div>
         </div>
 
-        <div className="mt-12 grid grid-cols-1 gap-8 border-t border-line pt-8 sm:grid-cols-3">
+        <dl className="mt-12 grid grid-cols-1 gap-8 border-t border-line pt-8 sm:grid-cols-3">
           {METRICS.map((m) => (
-            <Stat key={m.label[0]} value={m.value} suffix={m.suffix} label={m.label} align="left" />
+            <div key={m.label[0]}>
+              <dd className="text-[clamp(2.2rem,1.6rem+1.6vw,3.2rem)] leading-none font-medium tracking-[-0.05em] tabular-nums">
+                {m.value}
+                {m.suffix}
+              </dd>
+              <dt className="caps mt-2 text-muted">
+                {m.label.map((line) => (
+                  <span key={line} className="block">
+                    {line}
+                  </span>
+                ))}
+              </dt>
+            </div>
           ))}
-        </div>
+        </dl>
       </Card>
 
       <Card as="section" tone="night" className="mt-2 px-5 py-10 sm:px-8 sm:py-14">
