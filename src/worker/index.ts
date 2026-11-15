@@ -20,7 +20,8 @@ import { createZip } from '../shared/zip'
  * own record and statuses; every route here is a pure function of its payload.
  */
 type Env = {
-  ASSETS: Fetcher
+  /** Static assets binding; absent where a platform serves the assets itself. */
+  ASSETS?: Fetcher
   /** Point these at a self-hosted Ollama, llama.cpp or vLLM server. */
   MODEL_BASE_URL?: string
   MODEL_NAME?: string
@@ -267,6 +268,6 @@ app.post('/api/cron/reminders', async (c) => {
 })
 
 app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404))
-app.all('*', (c) => c.env.ASSETS.fetch(c.req.raw))
+app.all('*', (c) => (c.env.ASSETS ? c.env.ASSETS.fetch(c.req.raw) : c.text('Not found', 404)))
 
 export default app
