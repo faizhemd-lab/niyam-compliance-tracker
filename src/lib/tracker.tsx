@@ -1,7 +1,19 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { DEMO_COMPANY } from '../data'
-import { DEMO_MESSAGES } from './messages'
+import { AGENT_GREETING, type AgentChatMessage } from './messages'
+import {
+  applyFacts,
+  deriveProfile,
+  emptyKnowledge,
+  formatFact,
+  knowledgeFromCompany,
+  knowledgeToCompany,
+  FIELD_BY_KEY,
+  type FactSource,
+  type Knowledge,
+  type KnowledgeField,
+} from '../shared/knowledge'
 import { evaluateRules, missingFields } from '../shared/rules'
 import { buildCalendar, summarise, type StatusMap } from '../shared/schedule'
 import type {
@@ -17,13 +29,12 @@ import type {
   ShareLink,
 } from '../shared/types'
 
-const KEY = 'niyam:tracker:v1'
+const KEY = 'niyam:tracker:v2'
+const LEGACY_KEY = 'niyam:tracker:v1'
 
 export type TrackerState = {
-  company: Company
-  profile: Profile
-  messages: ChatMessage[]
-  awaiting: ProfileField | null
+  knowledge: Knowledge
+  agentMessages: AgentChatMessage[]
   statuses: StatusMap
   ticked: Record<string, DocKey[]>
   generated: GeneratedFile[]
@@ -32,40 +43,70 @@ export type TrackerState = {
   reminders: ReminderEntry[]
   budget: BudgetBand
   today: string
-  /** Set when the founder asks for a CA introduction. */
   intros: string[]
 }
 
-const initial: TrackerState = {
-  company: { name: '' },
-  profile: {},
-  messages: DEMO_MESSAGES,
-  awaiting: 'entity',
-  statuses: {},
-  ticked: {},
-  generated: [],
-  shares: [],
-  activity: [],
-  reminders: [],
-  budget: '10k_30k',
-  today: new Date().toISOString().slice(0, 10),
-  intros: [],
+/** The facts the sample company starts with, beyond the profile fields. */
+const DEMO_EXTRAS: Partial<Record<KnowledgeField, unknown>> = {
+  authorised_capital: 1_000_000,
+  paid_up_capital: 250_000,
+  fy_end: '31 March',
+  address: 'Plot 12, Hitec City, Hyderabad, Telangana',
+  authorised_signatory: 'Ananya Rao',
+  premises: true,
+}
+
+function demoKnowledge(): Knowledge {
+  return applyFacts(knowledgeFromCompany(DEMO_COMPANY, 'import'), DEMO_EXTRAS, 'import').knowledge
+}
+
+function baseState(): TrackerState {
+  return {
+    knowledge: emptyKnowledge(),
+    agentMessages: [{ id: 'greeting', role: 'agent', text: AGENT_GREETING, at: new Date().toISOString() }],
+    statuses: {},
+    ticked: {},
+    generated: [],
+    shares: [],
+    activity: [],
+    reminders: [],
+    budget: '10k_30k',
+    today: new Date().toISOString().slice(0, 10),
+    intros: [],
+  }
 }
 
 function load(): TrackerState {
+  const fallback = baseState()
   try {
     const raw = localStorage.getItem(KEY)
-    if (!raw) return initial
-    const parsed = JSON.parse(raw) as Partial<TrackerState>
-    return { ...initial, ...parsed }
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<TrackerState>
+      return { ...fallback, ...parsed, knowledge: parsed.knowledge ?? emptyKnowledge() }
+    }
+    // Migrate the first build's stored record, so existing answers survive.
+    const legacyRaw = localStorage.getItem(LEGACY_KEY)
+    if (legacyRaw) {
+      const legacy = JSON.parse(legacyRaw) as { company?: Company; profile?: Profile; statuses?: StatusMap; generated?: GeneratedFile[]; activity?: ActivityEntry[] }
+      const company = legacy.company ?? ({ ...(legacy.profile ?? {}) } as Company)
+      return {
+        ...fallback,
+        knowledge: Object.keys(company).length ? knowledgeFromCompany(company, 'import') : emptyKnowledge(),
+        statuses: legacy.statuses ?? {},
+        generated: legacy.generated ?? [],
+        activity: legacy.activity ?? [],
+      }
+    }
+    return fallback
   } catch {
-    return initial
+    return fallback
   }
 }
 
 type Context = {
   state: TrackerState
   set: (patch: Partial<TrackerState>) => void
+  knowledge: Knowledge
   company: Company
   profile: Profile
   obligations: ReturnType<typeof evaluateRules>
@@ -73,11 +114,12 @@ type Context = {
   summary: ReturnType<typeof summarise>
   needsIncorporation: string[]
   missing: ProfileField[]
-  startInterview: () => void
   loadDemo: () => void
   reset: () => void
   mergeProfile: (updates: Partial<Profile>, note?: string) => void
-  addMessage: (message: ChatMessage) => void
+  setKnowledge: (knowledge: Knowledge, note?: string) => void
+  applyKnowledge: (patch: Partial<Record<KnowledgeField, unknown>>, source?: FactSource) => { changed: number; errors: string[] }
+  addAgentMessage: (message: AgentChatMessage) => void
   markDone: (id: string, by: 'founder' | 'ca') => void
   reopen: (id: string) => void
   toggleDoc: (deadlineId: string, doc: DocKey) => void
@@ -92,6 +134,19 @@ const TrackerContext = createContext<Context | null>(null)
 let seq = 0
 export const newId = () => `${Date.now().toString(36)}-${(seq++).toString(36)}`
 
+/** Map the rules profile back onto knowledge keys, for older callers. */
+const PROFILE_TO_FIELD: Partial<Record<ProfileField, KnowledgeField>> = {
+  entity: 'entity',
+  state: 'state',
+  turnover: 'turnover',
+  employees: 'employees',
+  sells: 'sells',
+  gst_registered: 'gst_registered',
+  interstate: 'interstate',
+  foreign_investment: 'foreign_investment',
+  incorporated_on: 'incorporated_on',
+}
+
 export function TrackerProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<TrackerState>(load)
 
@@ -105,7 +160,8 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
 
   const set = useCallback((patch: Partial<TrackerState>) => setState((s) => ({ ...s, ...patch })), [])
 
-  const profile = state.profile
+  const profile = useMemo(() => deriveProfile(state.knowledge), [state.knowledge])
+  const company = useMemo(() => knowledgeToCompany(state.knowledge), [state.knowledge])
   const obligations = useMemo(() => evaluateRules(profile), [profile])
   const { deadlines, needsIncorporation } = useMemo(
     () => buildCalendar(profile, obligations, state.today, state.statuses),
@@ -122,16 +178,57 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
     [],
   )
 
-  const mergeProfile = useCallback(
-    (updates: Partial<Profile>, note?: string) => {
+  const setKnowledge = useCallback(
+    (knowledge: Knowledge, note?: string) =>
       setState((s) => ({
         ...s,
-        profile: { ...s.profile, ...updates },
-        company: { ...s.company, ...updates },
+        knowledge,
         activity: note
-          ? [{ id: newId(), at: new Date().toISOString(), actor: 'founder' as const, action: 'Updated profile', detail: note }, ...s.activity].slice(0, 80)
+          ? [{ id: newId(), at: new Date().toISOString(), actor: 'founder' as const, action: 'Updated the company record', detail: note }, ...s.activity].slice(0, 80)
           : s.activity,
-      }))
+      })),
+    [],
+  )
+
+  const applyKnowledge = useCallback((patch: Partial<Record<KnowledgeField, unknown>>, source: FactSource = 'manual') => {
+    let result = { changed: 0, errors: [] as string[] }
+    setState((s) => {
+      const applied = applyFacts(s.knowledge, patch, source)
+      result = {
+        changed: applied.changed.length,
+        errors: applied.errors.map((e) => e.message),
+      }
+      if (!applied.changed.length && !applied.errors.length) return s
+      const detail = applied.changed.map((c) => `${c.label} → ${c.to}`).join(', ')
+      return {
+        ...s,
+        knowledge: applied.knowledge,
+        activity: applied.changed.length
+          ? [{ id: newId(), at: new Date().toISOString(), actor: 'founder' as const, action: 'Edited the company record', detail }, ...s.activity].slice(0, 80)
+          : s.activity,
+      }
+    })
+    return result
+  }, [])
+
+  const mergeProfile = useCallback(
+    (updates: Partial<Profile>, note?: string) => {
+      const patch: Partial<Record<KnowledgeField, unknown>> = {}
+      for (const [key, value] of Object.entries(updates) as [ProfileField, unknown][]) {
+        const field = PROFILE_TO_FIELD[key]
+        if (field && value !== undefined) patch[field] = value
+      }
+      if (!Object.keys(patch).length) return
+      setState((s) => {
+        const applied = applyFacts(s.knowledge, patch, 'manual')
+        return {
+          ...s,
+          knowledge: applied.knowledge,
+          activity: note
+            ? [{ id: newId(), at: new Date().toISOString(), actor: 'founder' as const, action: 'Updated the company record', detail: note }, ...s.activity].slice(0, 80)
+            : s.activity,
+        }
+      })
     },
     [],
   )
@@ -139,40 +236,38 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
   const value: Context = {
     state,
     set,
-    company: state.company,
+    knowledge: state.knowledge,
+    company,
     profile,
     obligations,
     deadlines,
     summary,
     needsIncorporation,
     missing: missingFields(profile),
-    startInterview: () => {
-      set({ messages: DEMO_MESSAGES, awaiting: 'entity', statuses: {}, ticked: {}, generated: [] })
-      log('Started interview', 'A new compliance check was started.')
-    },
     loadDemo: () =>
       setState((s) => ({
         ...s,
-        profile: { ...DEMO_COMPANY },
-        company: { ...DEMO_COMPANY },
+        knowledge: demoKnowledge(),
         statuses: {},
         ticked: {},
         generated: [],
+        agentMessages: [
+          { id: newId(), role: 'agent', text: `Loaded the sample company: ${DEMO_COMPANY.name}, a private limited company in Telangana. 12 people, ₹60 lakh turnover, no GST yet. Ask me what is due, or tell me something that changed.`, at: new Date().toISOString() },
+        ],
         activity: [{ id: newId(), at: new Date().toISOString(), actor: 'founder', action: 'Loaded the sample company', detail: DEMO_COMPANY.name }, ...s.activity],
       })),
     reset: () => {
-      setState({ ...initial, today: new Date().toISOString().slice(0, 10) })
+      setState({ ...baseState(), today: new Date().toISOString().slice(0, 10) })
     },
     mergeProfile,
-    addMessage: (message) => setState((s) => ({ ...s, messages: [...s.messages, message] })),
+    setKnowledge,
+    applyKnowledge,
+    addAgentMessage: (message) => setState((s) => ({ ...s, agentMessages: [...s.agentMessages, message].slice(-40) })),
     markDone: (id, by) =>
       setState((s) => ({
         ...s,
         statuses: { ...s.statuses, [id]: { status: 'done', done_at: new Date().toISOString(), done_by: by } },
-        activity: [
-          { id: newId(), at: new Date().toISOString(), actor: by, action: 'Marked done', detail: id },
-          ...s.activity,
-        ].slice(0, 80),
+        activity: [{ id: newId(), at: new Date().toISOString(), actor: by, action: 'Marked done', detail: id }, ...s.activity].slice(0, 80),
       })),
     reopen: (id) =>
       setState((s) => {
@@ -205,8 +300,17 @@ export function useTracker() {
   return context
 }
 
-/** The deadline a page is looking at, from the id in the URL. */
 export function useDeadline(id: string | undefined) {
   const { deadlines } = useTracker()
   return deadlines.find((d) => d.id === id)
 }
+
+/** Show a fact for the knowledge panel, with where it came from. */
+export function factLine(key: KnowledgeField, knowledge: Knowledge) {
+  const fact = knowledge.facts[key]
+  const spec = FIELD_BY_KEY.get(key)
+  if (!fact || !spec) return null
+  return { label: spec.label, value: formatFact(spec, fact.value), source: fact.source, at: fact.updated_at }
+}
+
+export type { ChatMessage }

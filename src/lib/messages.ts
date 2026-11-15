@@ -1,17 +1,24 @@
-import type { ChatMessage } from '../shared/types'
+import type { AgentCall, AgentAction } from '../shared/agent'
 
-export const GREETING =
-  'Hi! I will help you find out which government filings apply to your business. It takes about three minutes, and you can answer with the buttons or in your own words.'
+export const AGENT_GREETING =
+  'I keep the record of this business and turn it into a compliance calendar. Tell me about it in your own words — company type, state, turnover, headcount — and I will file it away. Then ask me to draft a filing and I will fill the templates from what I know.'
 
-export const DEMO_MESSAGES: ChatMessage[] = [
-  {
-    id: 'greeting',
-    role: 'tracker',
-    text: GREETING,
-    at: new Date().toISOString(),
-    chips: ['Private Limited', 'LLP', 'Partnership', 'Sole proprietor'],
-  },
+export const QUICK_PROMPTS = [
+  'We are a private limited company in Telangana, about ₹60 lakh a year, 12 people. We sell services and are not GST registered.',
+  'What do we owe the government?',
+  'Draft the documents for the AGM',
+  'Actually we now have 25 employees',
+  'We raised ₹2 crore from a US investor last month',
+  'Our director is Ananya Rao, DIN 01234567',
 ]
 
-export const CONTEXT_ANSWER =
-  'I can explain any deadline, update your answers, mark something done or find you a CA. For anything outside that, ask a CA.'
+export type AgentChatMessage = {
+  id: string
+  role: 'founder' | 'agent'
+  text: string
+  at: string
+  calls?: AgentCall[]
+  actions?: AgentAction[]
+  changes?: { label: string; to: string }[]
+  engine?: string
+}

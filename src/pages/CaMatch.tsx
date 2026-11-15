@@ -48,9 +48,9 @@ export function CaMatch() {
     return (
       <Shell>
         <Header />
-        <PageHead eyebrow="Find a CA" title="Match on what you actually owe" intro="Matching needs the obligations that apply to you. Finish the interview first — it takes three minutes." />
+        <PageHead eyebrow="Find a CA" title="Match on what you actually owe" intro="Matching needs the obligations that apply to you. Tell the agent about the business first — one line is enough." />
         <Card className="mt-2">
-          <EmptyState title="No profile yet" body="Answer the eight questions and the matcher scores CAs on the filings you really have." action={<ButtonLink to="/interview" variant="violet">Check my compliance</ButtonLink>} />
+          <EmptyState title="No record yet" body="Tell the agent about the business and the matcher scores CAs on the filings you really have." action={<ButtonLink to="/agent" variant="violet">Talk to the agent</ButtonLink>} />
         </Card>
         <Footer />
       </Shell>

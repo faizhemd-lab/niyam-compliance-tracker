@@ -18,7 +18,7 @@ export const NAV = [
   { to: '/share', label: 'Share' },
 ]
 
-export const MENU = [{ to: '/', label: 'Home' }, { to: '/interview', label: 'Check my compliance' }, ...NAV, { to: '/company', label: 'Company profile' }, { to: '/import', label: 'Import data' }]
+export const MENU = [{ to: '/', label: 'Home' }, { to: '/agent', label: 'Talk to the agent' }, ...NAV, { to: '/company', label: 'Company record' }, { to: '/import', label: 'Import data' }]
 
 export const PROBLEM = [
   '“I did not know a director KYC was due. The fees were ₹5,000 and my DIN stopped working.”',
@@ -33,8 +33,8 @@ export const METRICS = [
 ]
 
 export const JOURNEY = [
-  { title: 'Start', body: 'Open the tracker and choose “Check my compliance”.' },
-  { title: 'Tell us about your business', body: 'A short chat with tap-to-answer buttons, in plain language. Answers already in your database are skipped.' },
+  { title: 'Start', body: 'Open the agent and say what the business is, in your own words.' },
+  { title: 'Tell the agent', body: 'It keeps one record of the company, fills gaps by asking, and updates the record whenever you correct it.' },
   { title: 'See what applies', body: '“14 obligations: 3 need attention now, 6 this quarter, 5 later.” Every row says why it applies.' },
   { title: 'Open the calendar', body: 'Each date shows the authority and the penalty, colour coded by urgency.' },
   { title: 'Prepare', body: 'Every item carries a document checklist. One click compiles drafts into an organised folder.' },
@@ -43,14 +43,14 @@ export const JOURNEY = [
 ]
 
 export const FEATURES = [
-  { title: 'Interview on your own server', body: 'Slot-filling chat with tap answers. Identifiers are masked before any model call.', status: 'Real' },
+  { title: 'A local agent that remembers', body: 'Free-form chat that reads and writes one company record, with every write validated. Runs on your own server.', status: 'Real' },
   { title: 'Obligations that explain themselves', body: 'The rules engine returns the reason written from your own answers, plus the rule version.', status: 'Real' },
   { title: 'Calendar with authority and penalty', body: 'Monthly, quarterly, yearly and one-off deadlines for the next 12 months, with .ics export.', status: 'Real' },
   { title: 'Reminders until done', body: '30, 7, 3, 1 days before and on the day, then daily while overdue, with a simulated clock.', status: 'Real' },
   { title: 'Urgency that is not colour alone', body: 'Red, amber, green, grey and blue, each with a text label such as “Overdue by 5 days”.', status: 'Real' },
   { title: 'Company database plug-in', body: 'CSV upload, header detection and a column mapping you confirm once and reuse.', status: 'Real (CSV)' },
   { title: 'Document checklist per item', body: 'Have, Missing or Can be generated, rolled up onto the calendar entry.', status: 'Real' },
-  { title: 'Document compiler and folders', body: 'Draft resolutions, notices, KYC sheets, employee master and GST data, zipped by financial year.', status: 'Real' },
+  { title: 'Agent-drafted documents', body: 'Ask in chat for any filing; it compiles the cover sheet, templates and checklist, and names the facts it still needs.', status: 'Real' },
   { title: 'Share with your CA', body: 'A random link, hashed at rest, with view or view-and-mark-done permission and an activity log.', status: 'Real (link)' },
   { title: 'CA matching', body: 'Weighted scoring on specialty, location, budget, rating and availability, with reasons.', status: 'Mock directory' },
 ]
@@ -105,8 +105,8 @@ export const BUDGET_OPTIONS: { value: BudgetBand; label: string }[] = [
 
 export const DEMO_SCRIPT = [
   'A founder finds out about a filing only when the notice arrives.',
-  'Three questions in, the tracker already knows GST applies next month.',
+  'One line about the business, and the agent has a full compliance record.',
   'Open any deadline: the authority, the penalty and the reason it exists.',
-  'Compile the folder, download the drafts, share it with a CA.',
+  'Ask it to draft the filing; every folder comes marked DRAFT.',
   'Move the clock. Watch a reminder fire, go overdue, then stop when marked done.',
 ]

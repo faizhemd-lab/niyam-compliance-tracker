@@ -42,8 +42,8 @@ export function Header() {
           </nav>
           <div className="flex items-center gap-2">
             <span className="caps hidden text-muted xl:inline">{summary.total} obligations</span>
-            <ButtonLink to="/interview" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
-              Check my compliance
+            <ButtonLink to="/agent" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
+              Talk to the agent
             </ButtonLink>
             <IconButton aria-label="Open menu" aria-expanded={open} tone="outline" size="sm" onClick={() => setOpen(true)} className="lg:hidden">
               <Menu className="size-4" />

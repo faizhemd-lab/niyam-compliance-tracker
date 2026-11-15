@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 
+import { modelStatus, runAgent } from '../shared/agent'
 import { CAS, RULES, RULE_VERSION } from '../shared/catalogue'
 import { compileDeadline } from '../shared/documents'
 import { classify, explain, extract, GATEWAY, maskIdentifiers } from '../shared/gateway'
@@ -7,6 +8,7 @@ import { matchCAs } from '../shared/matching'
 import { runReminderJob } from '../shared/reminders'
 import { evaluateRules, missingFields, profileLine } from '../shared/rules'
 import { buildCalendar, summarise } from '../shared/schedule'
+import type { AgentInput } from '../shared/agent'
 import type { Company, Deadline, Profile, ReminderEntry, SharePermission } from '../shared/types'
 import { applyMapping, parseCsv, proposeMapping } from '../shared/validation'
 import { createZip } from '../shared/zip'
@@ -17,7 +19,13 @@ import { createZip } from '../shared/zip'
  * profile always produces the same calendar. The browser keeps the founder's
  * own record and statuses; every route here is a pure function of its payload.
  */
-type Env = { ASSETS: Fetcher }
+type Env = {
+  ASSETS: Fetcher
+  /** Point these at a self-hosted Ollama, llama.cpp or vLLM server. */
+  MODEL_BASE_URL?: string
+  MODEL_NAME?: string
+  MODEL_API_KEY?: string
+}
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -72,6 +80,36 @@ app.post('/api/interview/message', async (c) => {
 })
 
 // 2. Read or correct the company profile; recomputation happens from the result.
+// 1b. The agent: free-form conversation that keeps and updates the company record.
+app.get('/api/agent/status', async (c) => c.json(await modelStatus(c.env)))
+
+app.post('/api/agent/message', async (c) => {
+  const body = await readJson(c.req.raw)
+  if (!body) return badJson()
+  // The agent reads the raw message so it can store PAN/GSTIN in masked form;
+  // masking happens again at the model boundary inside runAgent.
+  const message = typeof body.message === 'string' ? body.message.slice(0, 4000).trim() : ''
+  if (!message) return c.json({ error: 'Say something for the agent to work with.' }, { status: 422 })
+  const knowledge = (body.knowledge ?? { facts: {} }) as AgentInput['knowledge']
+  if (typeof knowledge !== 'object' || !knowledge || typeof knowledge.facts !== 'object') {
+    return c.json({ error: 'Send the company record as { facts: {} }.' }, { status: 422 })
+  }
+  const history = Array.isArray(body.history) ? (body.history as AgentInput['history']).slice(-12) : []
+  const reply = await runAgent(
+    {
+      knowledge,
+      message,
+      history: history.filter((m) => m && (m.role === 'founder' || m.role === 'agent') && typeof m.text === 'string'),
+      today: typeof body.today === 'string' ? body.today : today(),
+      statuses: (body.statuses ?? {}) as Record<string, { status: 'open' | 'done' }>,
+      budget: body.budget as AgentInput['budget'],
+      language: body.language === 'hi' ? 'hi' : 'en',
+    },
+    c.env,
+  )
+  return c.json(reply)
+})
+
 app.post('/api/company', async (c) => {
   const body = await readJson(c.req.raw)
   if (!body) return badJson()
@@ -166,7 +204,8 @@ app.post('/api/deadlines/compile', async (c) => {
   const deadline = body.deadline as Deadline | undefined
   if (!deadline?.rule_id) return c.json({ error: 'Send the deadline to compile.' }, { status: 422 })
   const ticked = Array.isArray(body.ticked) ? (body.ticked as never[]) : []
-  const result = compileDeadline(company, deadline, typeof body.today === 'string' ? body.today : today(), ticked)
+  const knowledge = body.knowledge as Parameters<typeof compileDeadline>[4]
+  const result = compileDeadline(company, deadline, typeof body.today === 'string' ? body.today : today(), ticked, knowledge)
   return c.json(result)
 })
 

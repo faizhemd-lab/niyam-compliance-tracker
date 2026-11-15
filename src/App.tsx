@@ -1,9 +1,10 @@
 import { MotionConfig, motion } from 'motion/react'
 import { useEffect } from 'react'
-import { BrowserRouter, Route, Routes, useLocation } from 'react-router'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router'
 
 import { ToastProvider } from './components/Overlay'
 import { TrackerProvider } from './lib/tracker'
+import { Agent } from './pages/Agent'
 import { CaMatch } from './pages/CaMatch'
 import { CalendarPage } from './pages/Calendar'
 import { CompanyPage } from './pages/Company'
@@ -11,7 +12,6 @@ import { DeadlinePage } from './pages/Deadline'
 import { Documents } from './pages/Documents'
 import { Home } from './pages/Home'
 import { ImportPage } from './pages/Import'
-import { Interview } from './pages/Interview'
 import { NotFound } from './pages/NotFound'
 import { Obligations } from './pages/Obligations'
 import { Reminders } from './pages/Reminders'
@@ -46,7 +46,8 @@ function Pages() {
     >
       <Routes location={location}>
         <Route index element={<Home />} />
-        <Route path="interview" element={<Interview />} />
+        <Route path="agent" element={<Agent />} />
+        <Route path="interview" element={<Navigate to="/agent" replace />} />
         <Route path="obligations" element={<Obligations />} />
         <Route path="calendar" element={<CalendarPage />} />
         <Route path="deadline/:id" element={<DeadlinePage />} />

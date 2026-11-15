@@ -32,7 +32,7 @@ const STATE_TONE = {
 export function DeadlinePage() {
   const { id } = useParams()
   const deadlineId = decodeURIComponent(id ?? '')
-  const { state, company, deadlines, markDone, reopen, toggleDoc, addGenerated, log, mergeProfile } = useTracker()
+  const { state, company, knowledge, deadlines, markDone, reopen, toggleDoc, addGenerated, log, mergeProfile } = useTracker()
   const toast = useToast()
   const deadline = deadlines.find((d) => d.id === deadlineId)
   useDocumentTitle(deadline?.short ?? 'Deadline')
@@ -68,9 +68,10 @@ export function DeadlinePage() {
 
   const compile = async () => {
     setCompiling(true)
-    const local = compileDeadline(company, deadline, state.today, ticked)
+    const local = compileDeadline(company, deadline, state.today, ticked, knowledge)
     const res = await postJson<{ files: GeneratedFile[]; missing: string[]; folder: string }>('/api/deadlines/compile', {
       company,
+      knowledge,
       deadline,
       today: state.today,
       ticked,
@@ -214,9 +215,18 @@ export function DeadlinePage() {
                   {progress.ready} of {progress.total} ready. {deadline.documents.length} documents for this filing.
                 </p>
               </div>
-              <Button variant="solid" size="sm" onClick={() => void compile()} loading={compiling} icon={<Sparkles className="size-4" />}>
-                Compile drafts
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <ButtonLink
+                  to={`/agent?ask=${encodeURIComponent(`Draft the documents for ${deadline.short}`)}`}
+                  variant="outline"
+                  size="sm"
+                >
+                  Ask the agent
+                </ButtonLink>
+                <Button variant="solid" size="sm" onClick={() => void compile()} loading={compiling} icon={<Sparkles className="size-4" />}>
+                  Compile drafts
+                </Button>
+              </div>
             </div>
 
             <ul className="mt-4 divide-y divide-line border-y border-line">
