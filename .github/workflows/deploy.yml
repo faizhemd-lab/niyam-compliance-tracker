@@ -26,9 +26,9 @@ jobs:
       # Not secret: the account that owns niyam-compliance-tracker.workers.dev.
       CLOUDFLARE_ACCOUNT_ID: 8fa5a4ce9840184d1de645f309d8d6ca
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
