@@ -54,6 +54,29 @@ export async function writeRecord(db: D1Database, userId: string, data: string):
 }
 
 /**
+ * Write only if nobody saved since `base` (the updated_at the writer read).
+ * `base = null` means "only if there is no row yet". Returns the new
+ * updated_at, or null when the record moved on underneath the writer.
+ */
+export async function writeRecordIf(db: D1Database, userId: string, data: string, base: string | null): Promise<string | null> {
+  const updatedAt = new Date().toISOString()
+  const result =
+    base === null
+      ? await db.prepare('INSERT OR IGNORE INTO records (user_id, data, updated_at) VALUES (?, ?, ?)').bind(userId, data, updatedAt).run()
+      : await db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE user_id = ? AND updated_at = ?').bind(data, updatedAt, userId, base).run()
+  return (result.meta?.changes ?? 0) > 0 ? updatedAt : null
+}
+
+/** One page of records for the scheduled autopilot, in user_id order. */
+export async function listRecords(db: D1Database, after: string, limit = 50): Promise<{ user_id: string; data: string; updated_at: string }[]> {
+  const rows = await db
+    .prepare('SELECT user_id, data, updated_at FROM records WHERE user_id > ? ORDER BY user_id LIMIT ?')
+    .bind(after, limit)
+    .all<{ user_id: string; data: string; updated_at: string }>()
+  return rows.results ?? []
+}
+
+/**
  * The record is the source of truth for share links; this table is only a
  * lookup index from token hash to owner, so a public link can be resolved
  * without knowing whose record to read. Rebuilt from the record on each save.

@@ -53,40 +53,62 @@ facts, so:
 - deadlines that no longer apply are removed unless already done;
 - done items keep their status and who marked them.
 
-The agent uses **tools**, and the same tools run whether a model is driving or
-not:
+### The agent runs the tracker, on the server
 
-| Tool | What it does |
+The agent lives in the Worker next to the record store. On every turn it
+**loads the signed-in client's record from D1 itself**, works on it through
+tools, and saves it back with a version check (if the browser or the autopilot
+saved in the meantime, nothing is overwritten and the founder is asked to send
+again). The browser sends only the message. It has a tool for every area of the
+site, and pulls data with them whenever it needs it:
+
+| Area | Tools |
 | --- | --- |
-| `update_company` | Validates and merges facts read from the message |
-| `read_company` | Reads the record back |
-| `list_obligations` / `get_calendar` | Rules and dated calendar, never invented |
-| `draft_documents` | Compiles one filing, all open filings, or the overdue ones |
-| `explain_item` | Explains a filing from its record, with the faithfulness check |
-| `mark_done` | Marks a deadline done, which stops its reminders |
-| `find_ca` | Weighted CA matches with reasons |
+| Company record | `read_company`, `update_company` |
+| Obligations and calendar | `list_obligations`, `get_calendar` (open, overdue, next 30 days, done, events), `get_deadline`, `explain_item` |
+| Deadlines | `mark_done`, `reopen`, `tick_document` (checklist) |
+| Documents | `draft_documents` (one filing, all, overdue, due soon), `list_documents` |
+| Reminders | `run_reminders` (idempotent), `list_reminders` |
+| Sharing | `list_shares`, `propose_share`, `propose_revoke_share` |
+| CA, activity, settings | `find_ca`, `read_activity`, `set_budget`, `set_autopilot`, `run_autopilot` |
 
-The reply shows the tool calls it made, the facts it changed and links to the
-pages involved. Documents the compiler can draft for any filing include a filing
-cover sheet, board resolution, AGM notice, financial summary cover, director KYC
-sheet, share-allotment data (FC-GPR), employee master, GST data sheet and an
-authority letter — plus a per-folder checklist and manifest, all marked
-**DRAFT, review before use**.
+What it may do alone, and what it may not:
+
+- Safe actions run straight away: drafting, reminders, checklist ticks, record
+  updates (still validated), reading anything.
+- **Sharing the record or revoking access is only proposed.** It lands in
+  `record.pending`; the founder approves or declines it on the Agent page
+  (`POST /api/agent/approve`).
+- `mark_done` is refused unless the founder's message says the filing is filed
+  or paid.
+- "Take care of everything" drafts what is due in 30 days, runs reminders and
+  reports what still needs the founder.
+
+### Autopilot
+
+A Cron Trigger (`wrangler.jsonc`, `30 3 * * *` = 09:00 IST) walks every record
+and runs the morning check (`src/shared/autopilot.ts`): queue due reminders,
+draft folders for open deadlines due within 14 days that have none yet (at most
+six a run), and leave a briefing in the chat when there is something to say.
+It runs once per day per record, skips records where the founder paused it, and
+never marks anything done, shares anything or changes a fact. It is
+deterministic, so it behaves the same with or without a model server. "Run the
+morning check now" on the Agent page runs it on demand (`POST /api/agent/autopilot`).
 
 ### Two engines, one contract
 
 1. **Self-hosted model.** Set `MODEL_BASE_URL` (and `MODEL_NAME`) to an
    OpenAI-compatible server on your own hardware. Ollama, llama.cpp and vLLM all
    qualify. The agent sends the masked question plus tool schemas, executes the
-   tool calls it gets back, feeds the results in, and answers — at most three
-   model turns. `POST /api/agent/message` returns which engine answered.
+   tool calls it gets back, feeds the results in, and answers — at most six
+   model steps. Pick a model with tool calling (qwen2.5 7B or larger works best). `POST /api/agent/message` returns which engine answered.
 2. **On-server brain.** With no model configured or reachable, a deterministic
    brain in the Worker performs the same extraction, validation and tools. The
    app stays usable; the chat header says which engine is running.
 
 ```sh
 # optional: run a real local model
-ollama pull qwen2.5:3b
+ollama pull qwen2.5:7b
 cp .dev.vars.example .dev.vars     # MODEL_BASE_URL=http://localhost:11434/v1
 bun run dev
 ```
@@ -248,11 +270,13 @@ and the share-link lookup need a session and the D1 store.
 GET  /api/health
 GET  /api/me                             the signed-in client, or 401
 GET  /api/record                         that client's record, or null
-PUT  /api/record                         { data }  same-origin only
+PUT  /api/record                         { data, base }  same-origin; 409 if someone saved since base
 GET  /api/share/:token                   public: scoped deadlines + checklists
 POST /api/share/:token/done              public: needs mark-done permission
 GET  /api/agent/status                   which engine, which model, reachable?
-POST /api/agent/message                  { knowledge, message, history, today, statuses }
+POST /api/agent/message                  { message, today? }  signed in: the agent loads and saves the record
+POST /api/agent/approve                  { id, approve }      signed in: approve or decline a proposed action
+POST /api/agent/autopilot                { today? }           signed in: run the morning check now
 POST /api/interview/message              { profile, message, awaiting }   (legacy extractor)
 POST /api/company                        { profile, today }
 POST /api/company/import                 { csv }
@@ -275,7 +299,9 @@ POST /api/cron/reminders                 { profile, statuses, today, log, compan
 src/
   shared/        deterministic core, shared by the Worker, the agent and the UI
     knowledge.ts   the company record: fields, validation, provenance, extraction
-    agent.ts       agent loop, tools, self-hosted model client, fallback brain
+    record.ts      the stored record shape, shared by browser, agent and autopilot
+    agent.ts       agent loop, tools, self-hosted model client, fallback brain, approvals
+    autopilot.ts   the daily morning check
     catalogue.ts   the 22 rules, CA directory, states, city map
     rules.ts       condition evaluation, reasons, penalty examples
     schedule.ts    date generation, colours, summary, month grouping

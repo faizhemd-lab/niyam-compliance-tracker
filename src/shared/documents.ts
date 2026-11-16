@@ -41,7 +41,7 @@ const FOLDER: Record<ObligationGroup, string> = {
   labour: 'Labour',
 }
 
-function folderFor(deadline: Deadline): string {
+export function folderFor(deadline: Deadline): string {
   const fy = financialYear(deadline.due_date ?? new Date().toISOString().slice(0, 10))
   const dir = `${deadline.short.replace(/[^A-Za-z0-9]+/g, '-')}-${deadline.due_date ?? 'event'}`
   return `${fy}/${FOLDER[deadline.group]}/${dir}`

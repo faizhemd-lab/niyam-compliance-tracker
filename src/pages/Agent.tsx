@@ -1,13 +1,14 @@
-import { ArrowRight, Bot, Cpu, FileStack, Loader2, Send, Trash2, Wrench } from 'lucide-react'
+import { ArrowRight, Bot, Check, Cpu, FileStack, Loader2, Send, ShieldCheck, Sunrise, Trash2, Wrench, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { QUICK_PROMPTS } from '../lib/messages'
-import { postJson } from '../lib/api'
+import { getJson, postJson } from '../lib/api'
 import { useDocumentTitle } from '../lib/storage'
-import { newId, useTracker } from '../lib/tracker'
+import { useTracker, type TrackerState } from '../lib/tracker'
 import { localBrain, type AgentReply, type ModelStatus } from '../shared/agent'
 import { factRows, missingFacts, suggestedFacts } from '../shared/knowledge'
+import { formatDate } from '../shared/format'
 import { Header, PageHead, Shell } from '../components/AppShell'
 import { Badge, Chip, Logo } from '../components/Bits'
 import { Button, ButtonLink } from '../components/Button'
@@ -26,10 +27,11 @@ const SOURCE_LABEL: Record<string, string> = {
 
 export function Agent() {
   useDocumentTitle('Your compliance agent')
-  const { state, knowledge, company, obligations, summary, setKnowledge, addAgentMessage, addGenerated, markDone, log, reset } = useTracker()
+  const { state, set, knowledge, company, obligations, summary, adopt, flush, reset } = useTracker()
   const toast = useToast()
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [waiting, setWaiting] = useState<string | null>(null)
   const [model, setModel] = useState<ModelStatus | null>(null)
   const [showLog, setShowLog] = useState(false)
   const [params] = useSearchParams()
@@ -41,54 +43,77 @@ export function Agent() {
   const suggested = suggestedFacts(knowledge)
 
   useEffect(() => {
-    void fetch('/api/agent/status')
-      .then((r) => r.json() as Promise<ModelStatus>)
-      .then(setModel)
-      .catch(() => setModel({ configured: false, connected: false, engine: 'on-server deterministic brain' }))
+    void getJson<ModelStatus>('/api/agent/status').then((res) =>
+      setModel(res.ok ? res.data : { configured: false, connected: false, engine: 'on-server deterministic brain' }),
+    )
   }, [])
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [state.agentMessages.length, busy])
 
-  const remember = (reply: AgentReply, engine: string) => {
-    if (Object.keys(reply.knowledge.facts).length) setKnowledge(reply.knowledge)
-    addAgentMessage({
-      id: newId(),
-      role: 'agent',
-      text: reply.reply,
-      at: new Date().toISOString(),
-      calls: reply.calls.filter((c) => c.name !== 'answer'),
-      actions: reply.actions,
-      changes: reply.changes.map((c) => ({ label: c.label, to: c.to })),
-      engine,
-    })
-    if (reply.drafted?.files.length) addGenerated(reply.drafted.files)
-    if (reply.mark_done) markDone(reply.mark_done, 'founder')
-    if (reply.changes.length) log('Agent updated the record', reply.changes.map((c) => `${c.label} → ${c.to}`).join(', '))
+  const announce = (reply: AgentReply) => {
     if (reply.errors.length) toast(reply.errors[0].message)
-    if (reply.drafted?.files.length) toast(`${reply.drafted.files.length} drafts compiled. Every file is marked DRAFT.`)
+    else if (reply.proposed.length) toast('The agent is waiting for your approval.')
+    else if (reply.drafted?.files) toast(`${reply.drafted.files} drafts compiled. Every file is marked DRAFT.`)
   }
 
   const send = async (raw: string) => {
     const text = raw.trim()
     if (!text || busy) return
     setInput('')
-    addAgentMessage({ id: newId(), role: 'founder', text, at: new Date().toISOString() })
+    setWaiting(text)
     setBusy(true)
+    // The agent reads the record from the server, so local edits go first.
+    await flush()
 
-    const history = state.agentMessages.slice(-10).map((m) => ({ role: m.role, text: m.text }))
-    const payload = { knowledge, message: text, history, today: state.today, statuses: state.statuses, budget: state.budget }
-
-    const res = await postJson<AgentReply>('/api/agent/message', payload)
+    const res = await postJson<AgentReply & { saved_at: string }>('/api/agent/message', { message: text, today: state.today })
     if (res.ok) {
-      remember(res.data, res.data.model.connected ? res.data.model.model ?? 'local model' : res.data.model.engine)
+      adopt(res.data.record, res.data.saved_at)
       setModel(res.data.model)
+      announce(res.data)
+    } else if (res.status === 409 || res.status === 401 || res.status === 403) {
+      toast(res.error)
+      setInput(text)
     } else {
-      // The Worker is unreachable: run the same brain in the browser.
-      const fallback = localBrain({ ...payload, knowledge })
-      remember(fallback, 'browser fallback')
-      toast('The app server did not answer, so the agent ran in your browser. Nothing was lost.')
+      // The Worker or its record store is unreachable: run the same brain here.
+      const fallback = localBrain({ record: state, message: text }, 'browser fallback')
+      set(fallback.record)
+      announce(fallback)
+      toast('The app server did not answer, so the agent ran in your browser. Your changes will sync when it is back.')
+    }
+    setWaiting(null)
+    setBusy(false)
+  }
+
+  const decide = async (id: string, approve: boolean) => {
+    if (busy) return
+    setBusy(true)
+    await flush()
+    const res = await postJson<{ ok: boolean; message: string; record: TrackerState; saved_at: string }>('/api/agent/approve', { id, approve })
+    if (res.ok) {
+      adopt(res.data.record, res.data.saved_at)
+      toast(res.data.message)
+    } else {
+      toast(res.error)
+    }
+    setBusy(false)
+  }
+
+  const runMorningCheck = async () => {
+    if (busy) return
+    setBusy(true)
+    await flush()
+    const res = await postJson<{ record: TrackerState; saved_at: string; report: { reminders: number; drafted_folders: number; overdue: number } }>(
+      '/api/agent/autopilot',
+      { today: state.today },
+    )
+    if (res.ok) {
+      adopt(res.data.record, res.data.saved_at)
+      const r = res.data.report
+      toast(`Morning check: ${r.reminders} reminders, ${r.drafted_folders} folders drafted, ${r.overdue} overdue.`)
+    } else {
+      toast(res.error)
     }
     setBusy(false)
   }
@@ -208,10 +233,22 @@ export function Agent() {
                     </div>
                   )}
 
-                  {message.engine && <p className="mt-1.5 text-[11px] text-faint">{message.engine}</p>}
+                  {message.engine && (
+                    <p className="mt-1.5 flex items-center gap-1 text-[11px] text-faint">
+                      {message.autopilot && <Sunrise className="size-3" aria-hidden />}
+                      {message.autopilot ? `Autopilot · ${formatDate(message.at.slice(0, 10))}` : message.engine}
+                    </p>
+                  )}
                 </div>
               </div>
             ))}
+            {waiting && (
+              <div className="flex justify-end">
+                <div className="round inline-block max-w-[88%] rounded-[22px] bg-ink px-4 py-3 text-left text-[14.5px] leading-relaxed whitespace-pre-wrap text-white opacity-80">
+                  {waiting}
+                </div>
+              </div>
+            )}
             {busy && (
               <p className="flex items-center gap-2 text-[13px] text-muted">
                 <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -256,6 +293,31 @@ export function Agent() {
         </Card>
 
         <div className="grid content-start gap-2">
+          {state.pending.length > 0 && (
+            <Card as="section" className="border border-violet/40 px-5 py-5">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="size-4 text-violet" aria-hidden />
+                <h2 className="text-[15px] font-medium">Waiting for your approval</h2>
+              </div>
+              <p className="mt-1 text-[12.5px] text-muted">The agent never shares your record or removes access on its own.</p>
+              <ul className="mt-3 space-y-3">
+                {state.pending.map((p) => (
+                  <li key={p.id} className="rounded-[var(--radius-control)] border border-line px-3.5 py-3">
+                    <p className="text-[13px] leading-snug">{p.summary}</p>
+                    <div className="mt-2 flex gap-2">
+                      <Button variant="violet" size="sm" icon={<Check className="size-4" />} disabled={busy} onClick={() => void decide(p.id, true)}>
+                        Approve
+                      </Button>
+                      <Button variant="ghost" size="sm" icon={<X className="size-4" />} disabled={busy} onClick={() => void decide(p.id, false)}>
+                        Decline
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
           <Card as="section" className="px-5 py-5">
             <div className="flex items-center justify-between">
               <h2 className="text-[15px] font-medium">What the agent knows</h2>
@@ -347,13 +409,43 @@ export function Agent() {
             {!model?.connected && (
               <pre className="mt-3 overflow-x-auto rounded-[var(--radius-xs)] bg-night p-3 text-[11px] leading-relaxed text-white/85">{`# .dev.vars
 MODEL_BASE_URL=http://localhost:11434/v1
-MODEL_NAME=qwen2.5:3b`}</pre>
+MODEL_NAME=qwen2.5:7b`}</pre>
             )}
           </Card>
 
           <Card as="section" className="px-5 py-5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Sunrise className="size-4 text-violet" aria-hidden />
+                <h2 className="text-[15px] font-medium">Autopilot</h2>
+              </div>
+              <Badge tone={state.autopilot.enabled ? 'success' : 'neutral'}>{state.autopilot.enabled ? 'On' : 'Off'}</Badge>
+            </div>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
+              Every morning at 09:00 IST the agent checks your record on the server: it queues due reminders, drafts folders for anything due within{' '}
+              {state.autopilot.draft_within_days} days and leaves a briefing here. It never marks a filing done or shares anything on its own.
+            </p>
+            <p className="mt-2 text-[11.5px] text-muted">
+              {state.autopilot.last_run ? `Last ran ${formatDate(state.autopilot.last_run)}` : 'Has not run yet'}
+            </p>
+            <div className="mt-3 grid gap-2">
+              <Button variant="outline" size="sm" icon={<Sunrise className="size-4" />} disabled={busy} onClick={() => void runMorningCheck()}>
+                Run the morning check now
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => set({ autopilot: { ...state.autopilot, enabled: !state.autopilot.enabled } })}
+              >
+                {state.autopilot.enabled ? 'Pause autopilot' : 'Turn autopilot on'}
+              </Button>
+            </div>
+          </Card>
+
+          <Card as="section" className="px-5 py-5">
             <h2 className="text-[15px] font-medium">One-click jobs</h2>
-            <p className="mt-1 text-[12.5px] text-muted">These send a message to the agent with your current record.</p>
+            <p className="mt-1 text-[12.5px] text-muted">These ask the agent, which reads your record on the server.</p>
             <div className="mt-3 grid gap-2">
               <Button
                 variant="violet"

@@ -185,7 +185,7 @@ export type ShareLink = {
   created_at: string
 }
 
-export type ActivityEntry = { id: string; at: string; actor: 'founder' | 'ca'; action: string; detail: string }
+export type ActivityEntry = { id: string; at: string; actor: 'founder' | 'ca' | 'agent'; action: string; detail: string }
 
 export type ReminderStage = string
 

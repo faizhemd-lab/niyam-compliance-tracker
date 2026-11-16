@@ -1,13 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { getJson, putJson } from './api'
-import { AGENT_GREETING, type AgentChatMessage } from './messages'
 import { SessionSplash, useSession } from './session'
 import { CACHE_PREFIX, LEGACY_KEY } from './storage'
+import { useToast } from '../components/Overlay'
 import {
   applyFacts,
   deriveProfile,
-  emptyKnowledge,
   formatFact,
   knowledgeToCompany,
   FIELD_BY_KEY,
@@ -15,64 +14,15 @@ import {
   type Knowledge,
   type KnowledgeField,
 } from '../shared/knowledge'
+import { emptyRecord, newId, todayISO, withDefaults, type AgentChatMessage, type CompanyRecord } from '../shared/record'
 import { evaluateRules, missingFields } from '../shared/rules'
-import { buildCalendar, summarise, type StatusMap } from '../shared/schedule'
-import type {
-  ActivityEntry,
-  BudgetBand,
-  ChatMessage,
-  Company,
-  DocKey,
-  GeneratedFile,
-  Profile,
-  ProfileField,
-  ReminderEntry,
-  ShareLink,
-} from '../shared/types'
+import { buildCalendar, summarise } from '../shared/schedule'
+import type { ChatMessage, Company, DocKey, GeneratedFile, Profile, ProfileField, ReminderEntry } from '../shared/types'
 
-export type TrackerState = {
-  knowledge: Knowledge
-  agentMessages: AgentChatMessage[]
-  statuses: StatusMap
-  ticked: Record<string, DocKey[]>
-  generated: GeneratedFile[]
-  shares: ShareLink[]
-  activity: ActivityEntry[]
-  reminders: ReminderEntry[]
-  budget: BudgetBand
-  today: string
-  intros: string[]
-}
+/** The record as the browser holds it: the same shape the agent works on in D1. */
+export type TrackerState = CompanyRecord
 
-const todayISO = () => new Date().toISOString().slice(0, 10)
-
-/** A brand-new client's record: empty, with only the agent's greeting. */
-function baseState(): TrackerState {
-  return {
-    knowledge: emptyKnowledge(),
-    agentMessages: [{ id: 'greeting', role: 'agent', text: AGENT_GREETING, at: new Date().toISOString() }],
-    statuses: {},
-    ticked: {},
-    generated: [],
-    shares: [],
-    activity: [],
-    reminders: [],
-    budget: '10k_30k',
-    today: todayISO(),
-    intros: [],
-  }
-}
-
-/** A record as stored on the server still has to be filled out to the current shape. */
-function withDefaults(parsed: Partial<TrackerState>): TrackerState {
-  const base = baseState()
-  return {
-    ...base,
-    ...parsed,
-    knowledge: parsed.knowledge ?? emptyKnowledge(),
-    today: parsed.today ?? base.today,
-  }
-}
+export { newId }
 
 /** The pre-sign-in record, read once and then handed to the client's account. */
 function readLegacy(): TrackerState | null {
@@ -86,7 +36,7 @@ function readLegacy(): TrackerState | null {
 }
 
 /** Stable placeholder, so derived values stay referentially stable while loading. */
-const EMPTY = baseState()
+const EMPTY = emptyRecord()
 
 type Context = {
   state: TrackerState
@@ -111,12 +61,13 @@ type Context = {
   log: (action: string, detail: string, actor?: 'founder' | 'ca') => void
   addReminders: (entries: ReminderEntry[]) => void
   setToday: (iso: string) => void
+  /** Take a record the server just saved (from the agent), without saving it again. */
+  adopt: (record: TrackerState, savedAt: string) => void
+  /** Wait until every local change has reached the server. */
+  flush: () => Promise<void>
 }
 
 const TrackerContext = createContext<Context | null>(null)
-
-let seq = 0
-export const newId = () => `${Date.now().toString(36)}-${(seq++).toString(36)}`
 
 /** Map the rules profile back onto knowledge keys, for older callers. */
 const PROFILE_TO_FIELD: Partial<Record<ProfileField, KnowledgeField>> = {
@@ -137,6 +88,57 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<TrackerState | null>(null)
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
+  const toast = useToast()
+
+  /*
+   * Saving. The agent and the daily autopilot write the same D1 row, so every
+   * save carries `base` — the saved_at this browser last saw — and the server
+   * refuses it if someone saved since. On a refusal the browser takes the
+   * server's copy instead of overwriting it.
+   */
+  const savedAt = useRef<string | null>(null)
+  const latest = useRef<TrackerState | null>(null)
+  const fromServer = useRef<TrackerState | null>(null)
+  const dirty = useRef(false)
+  const chain = useRef<Promise<void>>(Promise.resolve())
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const adopt = useCallback((record: TrackerState, at: string | null) => {
+    savedAt.current = at
+    dirty.current = false
+    fromServer.current = record
+    setState(record)
+  }, [])
+
+  const pull = useCallback(async () => {
+    const res = await getJson<{ data: TrackerState | null; saved_at: string | null }>('/api/record')
+    if (res.ok && res.data.data && res.data.saved_at !== savedAt.current) adopt(withDefaults(res.data.data), res.data.saved_at)
+    return res
+  }, [adopt])
+
+  const flush = useCallback(() => {
+    if (timer.current) {
+      clearTimeout(timer.current)
+      timer.current = null
+    }
+    chain.current = chain.current.then(async () => {
+      const data = latest.current
+      if (!data || !dirty.current) return
+      dirty.current = false
+      const res = await putJson<{ saved_at: string }>('/api/record', { data, base: savedAt.current })
+      if (res.ok) {
+        savedAt.current = res.data.saved_at
+        return
+      }
+      if (res.status === 409) {
+        await pull()
+        toast('The agent updated your record on the server, so you are now looking at the latest copy.')
+        return
+      }
+      dirty.current = true
+    })
+    return chain.current
+  }, [pull, toast])
 
   // The server is the source of truth; this only fills the screen while it loads.
   useEffect(() => {
@@ -144,22 +146,23 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
     let alive = true
     setState(null)
     setError('')
+    savedAt.current = null
     void (async () => {
-      const res = await getJson<{ data: TrackerState | null }>('/api/record')
+      const res = await getJson<{ data: TrackerState | null; saved_at: string | null }>('/api/record')
       if (!alive) return
       if (!res.ok) {
         setError(res.error)
         return
       }
       if (res.data.data) {
-        setState(withDefaults(res.data.data))
+        adopt(withDefaults(res.data.data), res.data.saved_at)
         return
       }
       // First sign-in: carry over a record made before sign-in existed, once.
       const legacy = readLegacy()
       if (legacy) {
-        setState(legacy)
-        await putJson('/api/record', { data: legacy })
+        const put = await putJson<{ saved_at: string }>('/api/record', { data: legacy, base: null })
+        adopt(legacy, put.ok ? put.data.saved_at : null)
         try {
           localStorage.removeItem(LEGACY_KEY)
         } catch {
@@ -167,26 +170,41 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
         }
         return
       }
-      setState(baseState())
+      setState(emptyRecord())
     })()
     return () => {
       alive = false
     }
-  }, [userId, attempt])
+  }, [userId, attempt, adopt])
 
-  // Persist: a local copy for an instant reload, then a debounced save.
+  // Persist: a local copy for an instant reload, then a debounced, versioned save.
   useEffect(() => {
     if (!state || !userId) return
+    latest.current = state
     try {
       localStorage.setItem(CACHE_PREFIX + userId, JSON.stringify(state))
     } catch {
       /* storage full or private mode */
     }
-    const timer = setTimeout(() => {
-      void putJson('/api/record', { data: state })
-    }, 700)
-    return () => clearTimeout(timer)
-  }, [state, userId])
+    if (fromServer.current === state) return
+    dirty.current = true
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => void flush(), 700)
+  }, [state, userId, flush])
+
+  // Pick up what the agent or the autopilot did while this tab was in the background.
+  useEffect(() => {
+    if (!userId) return
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !dirty.current) void pull()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
+  }, [userId, pull])
 
   const update = useCallback((fn: (current: TrackerState) => TrackerState) => {
     setState((current) => (current ? fn(current) : current))
@@ -306,7 +324,9 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
     summary,
     needsIncorporation,
     missing: missingFields(profile),
-    reset: () => setState({ ...baseState(), today: todayISO() }),
+    reset: () => setState({ ...emptyRecord(), today: todayISO() }),
+    adopt,
+    flush,
     mergeProfile,
     setKnowledge,
     applyKnowledge,

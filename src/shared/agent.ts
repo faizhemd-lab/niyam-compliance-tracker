@@ -1,16 +1,14 @@
-import { CAS } from './catalogue'
-import { compileDeadline } from './documents'
-import { formatDate } from './format'
+import { deadlinesFor, runAutopilot } from './autopilot'
+import { CAS, DOC_LABELS } from './catalogue'
+import { checklistFor, compileDeadline } from './documents'
+import { addDays, formatDate, plural } from './format'
 import { explain, maskIdentifiers } from './gateway'
-import { matchCAs } from './matching'
-import { evaluateRules } from './rules'
-import { buildCalendar, type StatusMap } from './schedule'
 import {
   FIELDS,
   applyFacts,
+  deriveProfile,
   extractFacts,
   factValue,
-  hasFact,
   knowledgeForPrompt,
   knowledgeToCompany,
   missingFacts,
@@ -19,20 +17,45 @@ import {
   type Knowledge,
   type KnowledgeField,
 } from './knowledge'
-import type { BudgetBand, Deadline, GeneratedFile, Language } from './types'
+import { matchCAs } from './matching'
+import {
+  addFiles,
+  addMessages,
+  logActivity,
+  newId,
+  type AgentAction,
+  type AgentCall,
+  type AgentChatMessage,
+  type CompanyRecord,
+  type PendingAction,
+} from './record'
+import { runReminderJob } from './reminders'
+import { evaluateRules } from './rules'
+import { summarise } from './schedule'
+import type { BudgetBand, Deadline, DocKey, Language, ObligationGroup, ShareLink, SharePermission } from './types'
 
 /**
- * The agent. One brain, two engines behind it:
+ * The agent that runs the tracker.
  *
- * - a self-hosted OpenAI-compatible model (Ollama, llama.cpp, vLLM) reached
- *   through the model gateway, using tool calls to read and update the company
- *   knowledge base and to draft documents;
- * - an on-server deterministic brain, used when no model is configured or the
- *   model is unreachable, so the product still works.
+ * It lives in the Worker next to the record store. On every turn it loads the
+ * client's record from D1, works on it through tools — one for every area of
+ * the site — and saves the result back. The browser only sends the message.
  *
- * In both engines every write goes through the same validation. The model can
- * propose facts, never a deadline: rules and dates still come from the engine.
+ * Two engines drive the same tools:
+ * - a self-hosted OpenAI-compatible model (Ollama, llama.cpp, vLLM) chooses
+ *   tools in a loop of up to six steps;
+ * - a deterministic brain picks them from the message when no model is
+ *   configured or reachable, so every feature still works.
+ *
+ * Guardrails hold whichever engine is driving:
+ * - every fact write goes through the field registry's validation;
+ * - dates, applicability and penalties only come from the rules engine;
+ * - sharing the record or revoking access is only ever *proposed*; the founder
+ *   approves it (see `resolvePending`);
+ * - marking a filing done needs the founder to have said it is filed.
  */
+
+export type { AgentAction, AgentCall, AgentChatMessage }
 
 export type ModelEnv = { MODEL_BASE_URL?: string; MODEL_NAME?: string; MODEL_API_KEY?: string }
 
@@ -45,57 +68,46 @@ export type ModelStatus = {
   detail?: string
 }
 
-export type AgentToolName =
-  | 'update_company'
-  | 'read_company'
-  | 'list_obligations'
-  | 'get_calendar'
-  | 'draft_documents'
-  | 'explain_item'
-  | 'mark_done'
-  | 'find_ca'
-  | 'answer'
-
-export type AgentCall = { name: AgentToolName; summary: string; ok: boolean }
-export type AgentAction = { label: string; to: string }
-
 export type AgentFactChange = { key: KnowledgeField; label: string; from?: string; to: string; source: FactSource }
 
 export type AgentReply = {
   reply: string
-  knowledge: Knowledge
+  /** The whole record after this turn, including both chat messages. */
+  record: CompanyRecord
   calls: AgentCall[]
   actions: AgentAction[]
   changes: AgentFactChange[]
   errors: { key: KnowledgeField; message: string }[]
   missing: { key: KnowledgeField; label: string; ask: string }[]
   model: ModelStatus
-  drafted?: { files: GeneratedFile[]; folder_count: number; missing: string[] }
-  mark_done?: string
+  drafted?: { files: number; folders: number; missing: string[] }
+  /** Actions waiting for the founder's approval that this turn added. */
+  proposed: PendingAction[]
 }
 
 export type AgentInput = {
-  knowledge: Knowledge
+  record: CompanyRecord
   message: string
-  history: { role: 'founder' | 'agent'; text: string }[]
-  today: string
-  statuses: StatusMap
-  budget?: BudgetBand
+  /** Defaults to the record's own (possibly simulated) clock. */
+  today?: string
   language?: Language
 }
 
 type Ctx = {
-  input: AgentInput
-  knowledge: Knowledge
+  record: CompanyRecord
+  message: string
+  today: string
+  language: Language
   calls: AgentCall[]
   actions: AgentAction[]
   changes: AgentFactChange[]
   errors: AgentReply['errors']
   drafted?: AgentReply['drafted']
-  markDone?: string
+  proposed: PendingAction[]
 }
 
 const MODEL_TIMEOUT = 25_000
+const MAX_MODEL_STEPS = 6
 
 export async function modelStatus(env: ModelEnv): Promise<ModelStatus> {
   const baseUrl = env.MODEL_BASE_URL?.replace(/\/$/, '')
@@ -123,115 +135,211 @@ export async function modelStatus(env: ModelEnv): Promise<ModelStatus> {
 }
 
 // ---------------------------------------------------------------------------
-// Tools
+// Helpers
 
-function deadlinesFor(input: AgentInput): Deadline[] {
-  const profile = knowledgeToCompany(input.knowledge)
-  const obligations = evaluateRules(profile)
-  return buildCalendar(profile, obligations, input.today, input.statuses).deadlines
+const GROUPS: ObligationGroup[] = ['gst', 'company_law', 'income_tax', 'payroll', 'fema', 'labour']
+const BUDGETS: BudgetBand[] = ['under_10k', '10k_30k', '30k_60k', 'above_60k']
+const FILED_WORDS = /\b(filed|file[d]? it|done|completed?|paid|submitted|finished|sorted)\b/i
+
+function deadlines(ctx: Ctx): Deadline[] {
+  return deadlinesFor(ctx.record, ctx.today)
 }
 
-function findDeadline(deadlines: Deadline[], query: string): Deadline | undefined {
+function findDeadline(list: Deadline[], query: string): Deadline | undefined {
+  const exact = list.find((d) => d.id === query || d.rule_id === query)
+  if (exact) {
+    // A rule id names many occurrences; prefer the nearest open one.
+    if (exact.id === query) return exact
+    return list.filter((d) => d.rule_id === query && d.status !== 'done').sort(byDue)[0] ?? exact
+  }
   const words = query.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2)
   let best: { deadline: Deadline; score: number } | undefined
-  for (const deadline of deadlines) {
-    const haystack = `${deadline.rule_id} ${deadline.name} ${deadline.short} ${deadline.authority}`.toLowerCase()
-    const score = words.reduce((n, word) => n + (haystack.includes(word) ? 1 : 0), 0)
+  for (const deadline of [...list].sort(byDue)) {
+    const haystack = `${deadline.rule_id.replace(/_/g, ' ')} ${deadline.name} ${deadline.short} ${deadline.authority}`.toLowerCase()
+    let score = words.reduce((n, word) => n + (haystack.includes(word) ? 1 : 0), 0)
+    if (score > 0 && deadline.status !== 'done') score += 0.5
     if (score > 0 && (!best || score > best.score)) best = { deadline, score }
   }
   return best?.deadline
 }
 
-function runUpdate(ctx: Ctx, patch: Partial<Record<KnowledgeField, unknown>>, source: FactSource): string {
-  const result = applyFacts(ctx.knowledge, patch, source, new Date().toISOString())
-  ctx.knowledge = result.knowledge
-  ctx.changes.push(...result.changed.map((c) => ({ ...c, source })))
-  ctx.errors.push(...result.errors)
-  ctx.calls.push({
-    name: 'update_company',
-    summary: result.changed.length
-      ? `Updated ${result.changed.map((c) => `${c.label} to ${c.to}`).join(', ')}`
-      : result.errors.length
-        ? `Rejected ${result.errors.length} value${result.errors.length === 1 ? '' : 's'}`
-        : 'No change',
-    ok: result.errors.length === 0,
-  })
-  return result.changed.map((c) => `${c.label}: ${c.to}`).join('; ')
+/** Nearest first; undated (event) items last. */
+function byDue(a: Deadline, b: Deadline) {
+  if (!a.due_date) return 1
+  if (!b.due_date) return -1
+  return a.due_date.localeCompare(b.due_date)
 }
 
-function runDraft(ctx: Ctx, args: { scope?: string; rule_id?: string; query?: string }): string {
-  const deadlines = deadlinesFor(ctx.input).filter((d) => d.status !== 'done')
-  const company = knowledgeToCompany(ctx.knowledge)
+function line(d: Deadline) {
+  const when = d.due_date ? `${formatDate(d.due_date)} (${d.urgency})` : d.event_label ?? 'on event'
+  return `[${d.id}] ${d.name} — ${d.authority} — ${when} — ${d.status}${d.status === 'open' ? ` — penalty: ${d.penalty}` : ''}`
+}
+
+function findDoc(query: string): DocKey | undefined {
+  const q = query.toLowerCase().replace(/[_-]/g, ' ')
+  const entries = Object.entries(DOC_LABELS) as [DocKey, string][]
+  const exact = entries.find(([key]) => key.replace(/_/g, ' ') === q)
+  if (exact) return exact[0]
+  const words = q.split(/[^a-z0-9]+/).filter((w) => w.length > 2)
+  let best: { key: DocKey; score: number } | undefined
+  for (const [key, label] of entries) {
+    const hay = `${key.replace(/_/g, ' ')} ${label}`.toLowerCase()
+    const score = words.reduce((n, w) => n + (hay.includes(w) ? 1 : 0), 0)
+    if (score > 0 && (!best || score > best.score)) best = { key, score }
+  }
+  return best?.key
+}
+
+function activeShares(record: CompanyRecord) {
+  return record.shares.filter((s) => !s.revoked_at)
+}
+
+function call(ctx: Ctx, name: string, summary: string, ok = true) {
+  ctx.calls.push({ name, summary, ok })
+}
+
+function action(ctx: Ctx, label: string, to: string) {
+  if (!ctx.actions.some((a) => a.to === to)) ctx.actions.push({ label, to })
+}
+
+// ---------------------------------------------------------------------------
+// Tools: one per area of the site
+
+function runUpdate(ctx: Ctx, patch: Partial<Record<KnowledgeField, unknown>>, source: FactSource): string {
+  const result = applyFacts(ctx.record.knowledge, patch, source, new Date().toISOString())
+  ctx.record = { ...ctx.record, knowledge: result.knowledge }
+  ctx.changes.push(...result.changed.map((c) => ({ ...c, source })))
+  ctx.errors.push(...result.errors)
+  if (result.changed.length) {
+    ctx.record = logActivity(ctx.record, 'agent', 'Agent updated the record', result.changed.map((c) => `${c.label} → ${c.to}`).join(', '))
+  }
+  call(
+    ctx,
+    'update_company',
+    result.changed.length
+      ? `Updated ${result.changed.map((c) => `${c.label} to ${c.to}`).join(', ')}`
+      : result.errors.length
+        ? `Rejected ${plural(result.errors.length, 'value')}`
+        : 'No change',
+    result.errors.length === 0,
+  )
+  const saved = result.changed.map((c) => `${c.label}: ${c.to}`).join('; ')
+  const rejected = result.errors.map((e) => `${e.key}: ${e.message}`).join('; ')
+  return [saved && `Saved ${saved}.`, rejected && `Rejected ${rejected}.`].filter(Boolean).join(' ') || 'No change.'
+}
+
+function runDraft(ctx: Ctx, args: { scope?: string; query?: string; item?: string }): string {
+  const open = deadlines(ctx).filter((d) => d.status !== 'done')
+  const company = knowledgeToCompany(ctx.record.knowledge)
   let chosen: Deadline[] = []
-  if (args.rule_id) chosen = deadlines.filter((d) => d.rule_id === args.rule_id || d.id === args.rule_id)
-  else if (args.scope === 'all' || args.scope === 'everything') chosen = deadlines.filter((d) => d.due_date).slice(0, 12)
-  else if (args.scope === 'overdue') chosen = deadlines.filter((d) => (d.days_left ?? 0) < 0)
-  else if (args.query) {
-    const match = findDeadline(deadlines, args.query)
+  const query = args.item ?? args.query
+  if (args.scope === 'all' || args.scope === 'everything') chosen = open.filter((d) => d.due_date).sort(byDue).slice(0, 12)
+  else if (args.scope === 'overdue') chosen = open.filter((d) => (d.days_left ?? 0) < 0)
+  else if (args.scope === 'due_soon') chosen = open.filter((d) => d.due_date && (d.days_left ?? 99) <= 30).sort(byDue)
+  else if (query) {
+    const match = findDeadline(open, query)
     if (match) chosen = [match]
   }
   if (!chosen.length) {
-    ctx.calls.push({ name: 'draft_documents', summary: 'Nothing matched that filing', ok: false })
-    return 'I could not find that filing on your calendar. Tell me its name, or ask for all documents.'
+    call(ctx, 'draft_documents', 'Nothing matched that filing', false)
+    return 'No open filing matched. Ask for a filing by name, or for all, overdue or due-soon documents.'
   }
 
-  const files: GeneratedFile[] = []
+  let files = 0
   const missing = new Set<string>()
   for (const deadline of chosen) {
-    const result = compileDeadline(company, deadline, ctx.input.today, [], ctx.knowledge)
-    files.push(...result.files)
+    const result = compileDeadline(company, deadline, ctx.today, ctx.record.ticked[deadline.id] ?? [], ctx.record.knowledge)
+    ctx.record = addFiles(ctx.record, result.files)
+    files += result.files.length
     result.missing.forEach((m) => missing.add(m))
   }
-  ctx.drafted = { files, folder_count: chosen.length, missing: [...missing] }
-  ctx.actions.push({ label: 'Open the compiled folders', to: '/documents' })
-  ctx.calls.push({
-    name: 'draft_documents',
-    summary: `Drafted ${files.length} files across ${chosen.length} folder${chosen.length === 1 ? '' : 's'}`,
-    ok: true,
-  })
-  return `${files.length} files for ${chosen.length} folder${chosen.length === 1 ? '' : 's'}`
+  ctx.drafted = { files, folders: chosen.length, missing: [...missing] }
+  ctx.record = logActivity(ctx.record, 'agent', 'Agent drafted documents', chosen.map((d) => d.short).join(', '))
+  action(ctx, 'Open the compiled folders', '/documents')
+  call(ctx, 'draft_documents', `Drafted ${files} files across ${plural(chosen.length, 'folder')}`)
+  return `Drafted ${files} files for ${chosen.map((d) => d.short).join(', ')}.${missing.size ? ` Missing from the record: ${[...missing].join(', ')}.` : ''}`
 }
 
-export function executeTool(ctx: Ctx, name: AgentToolName, args: Record<string, unknown>): string {
-  const input = ctx.input
-  const deadlines = deadlinesFor(input)
-  const company = knowledgeToCompany(ctx.knowledge)
+function propose(ctx: Ctx, pending: PendingAction): string {
+  ctx.record = { ...ctx.record, pending: [...ctx.record.pending, pending] }
+  ctx.proposed.push(pending)
+  call(ctx, pending.tool, `Waiting for your approval: ${pending.summary}`)
+  return `I need your approval before I do this: ${pending.summary}. Approve or decline it in the “Waiting for your approval” card beside the chat.`
+}
+
+export function executeTool(ctx: Ctx, name: string, args: Record<string, unknown>): string {
+  const company = knowledgeToCompany(ctx.record.knowledge)
+  const str = (key: string) => (typeof args[key] === 'string' ? (args[key] as string) : '')
 
   switch (name) {
+    // --- Company record -------------------------------------------------
+    case 'read_company': {
+      call(ctx, 'read_company', `Read ${Object.keys(ctx.record.knowledge.facts).length} facts`)
+      const missing = missingFacts(ctx.record.knowledge)
+      return `${knowledgeForPrompt(ctx.record.knowledge)}${missing.length ? `\nRequired but missing: ${missing.map((f) => f.key).join(', ')}` : ''}`
+    }
     case 'update_company': {
-      const patch = (args.facts ?? args.patch ?? {}) as Partial<Record<KnowledgeField, unknown>>
+      const patch = (args.facts ?? args.patch ?? {}) as Record<string, unknown>
       const safe: Partial<Record<KnowledgeField, unknown>> = {}
-      for (const [key, value] of Object.entries(patch)) {
+      for (const [key, value] of Object.entries(patch && typeof patch === 'object' ? patch : {})) {
         if (FIELDS.some((f) => f.key === key)) safe[key as KnowledgeField] = value
       }
       if (!Object.keys(safe).length) {
-        ctx.calls.push({ name: 'update_company', summary: 'No valid facts in that call', ok: false })
-        return 'Nothing to update.'
+        call(ctx, 'update_company', 'No valid facts in that call', false)
+        return 'Nothing to update: use the exact fact keys.'
       }
       return runUpdate(ctx, safe, 'agent')
     }
-    case 'read_company': {
-      ctx.calls.push({ name: 'read_company', summary: `Read ${Object.keys(ctx.knowledge.facts).length} facts`, ok: true })
-      return knowledgeForPrompt(ctx.knowledge)
-    }
+
+    // --- Obligations and calendar ---------------------------------------
     case 'list_obligations': {
-      const obligations = evaluateRules(company)
-      ctx.calls.push({ name: 'list_obligations', summary: `${obligations.length} obligations apply`, ok: true })
-      return obligations.map((o) => `${o.name} (${o.authority}, rule ${o.rule_version})`).join('\n')
+      const obligations = evaluateRules(deriveProfile(ctx.record.knowledge))
+      action(ctx, 'See every obligation', '/obligations')
+      call(ctx, 'list_obligations', `${obligations.length} obligations apply`)
+      return obligations.map((o) => `${o.name} (${o.authority}) — why: ${o.reason} — rule ${o.rule_version}${o.verified ? '' : ', not yet verified'}`).join('\n') || 'No obligations yet: the record is missing required facts.'
     }
     case 'get_calendar': {
-      const open = deadlines.filter((d) => d.status !== 'done')
-      const next = open.filter((d) => d.due_date).slice(0, 6)
-      ctx.actions.push({ label: 'Open the calendar', to: '/calendar' })
-      ctx.calls.push({ name: 'get_calendar', summary: `${open.length} open deadlines`, ok: true })
-      return next.map((d) => `${d.due_date}: ${d.name} — ${d.authority} (${d.penalty})`).join('\n')
+      const filter = str('filter') || 'open'
+      const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 25)
+      const all = deadlines(ctx).sort(byDue)
+      const list =
+        filter === 'overdue'
+          ? all.filter((d) => d.status !== 'done' && (d.days_left ?? 0) < 0)
+          : filter === 'next_30'
+            ? all.filter((d) => d.status !== 'done' && d.due_date && (d.days_left ?? 99) >= 0 && (d.days_left ?? 99) <= 30)
+            : filter === 'done'
+              ? all.filter((d) => d.status === 'done')
+              : filter === 'events'
+                ? all.filter((d) => !d.due_date)
+                : all.filter((d) => d.status !== 'done' && d.due_date)
+      const s = summarise(all)
+      action(ctx, 'Open the calendar', '/calendar')
+      call(ctx, 'get_calendar', `${list.length} ${filter} deadlines`)
+      return `${s.total} deadlines, ${s.urgent} urgent, ${s.events} waiting on an event.\n${list.slice(0, limit).map(line).join('\n') || `Nothing ${filter}.`}`
     }
-    case 'draft_documents':
-      return runDraft(ctx, args as { scope?: string; rule_id?: string; query?: string })
-    case 'explain_item': {
-      const deadline = findDeadline(deadlines, String(args.item ?? args.query ?? '')) ?? deadlines.find((d) => d.due_date)
+    case 'get_deadline': {
+      const deadline = findDeadline(deadlines(ctx), str('item'))
       if (!deadline) {
-        ctx.calls.push({ name: 'explain_item', summary: 'Nothing to explain yet', ok: false })
+        call(ctx, 'get_deadline', 'No matching deadline', false)
+        return 'No deadline matched that.'
+      }
+      const checklist = checklistFor(deadline, company, ctx.record.ticked[deadline.id] ?? [])
+      const sent = ctx.record.reminders.filter((r) => r.deadline_id === deadline.id).length
+      action(ctx, `Open ${deadline.short}`, `/deadline/${encodeURIComponent(deadline.id)}`)
+      call(ctx, 'get_deadline', `Read ${deadline.short}`)
+      return [
+        line(deadline),
+        `Why it applies: ${deadline.reason}`,
+        `How to file: ${deadline.how_to_file}`,
+        `Checklist: ${checklist.map((c) => `${c.label} [${c.key}] = ${c.state}`).join('; ')}`,
+        `Reminders logged: ${sent}`,
+      ].join('\n')
+    }
+    case 'explain_item': {
+      const list = deadlines(ctx)
+      const deadline = findDeadline(list, str('item') || ctx.message) ?? list.find((d) => d.due_date)
+      if (!deadline) {
+        call(ctx, 'explain_item', 'Nothing to explain yet', false)
         return 'There is no calendar yet. Tell me about the business first.'
       }
       const result = explain(
@@ -245,37 +353,170 @@ export function executeTool(ctx: Ctx, name: AgentToolName, args: Record<string, 
           due: deadline.due_date ? formatDate(deadline.due_date) : 'On event',
           rule_version: deadline.rule_version,
         },
-        input.language ?? 'en',
-        String(args.question ?? ''),
+        ctx.language,
+        str('question') || ctx.message,
       )
-      ctx.calls.push({ name: 'explain_item', summary: `Explained ${deadline.short}`, ok: true })
+      call(ctx, 'explain_item', `Explained ${deadline.short}`)
       return result.text
     }
+
+    // --- Deadline status and checklists ---------------------------------
     case 'mark_done': {
-      const deadline = findDeadline(deadlines, String(args.item ?? args.query ?? ''))
+      if (!FILED_WORDS.test(ctx.message)) {
+        call(ctx, 'mark_done', 'Refused: the founder has not said it is filed', false)
+        return 'Refused: only mark a filing done after the founder says it is filed or paid. Ask them.'
+      }
+      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status !== 'done'), str('item') || ctx.message)
       if (!deadline) {
-        ctx.calls.push({ name: 'mark_done', summary: 'No matching deadline', ok: false })
-        return 'I could not match that to a deadline.'
+        call(ctx, 'mark_done', 'No matching open deadline', false)
+        return 'No open deadline matched that.'
       }
-      ctx.markDone = deadline.id
-      ctx.calls.push({ name: 'mark_done', summary: `Marked ${deadline.short} done`, ok: true })
-      return `${deadline.short} is marked done; reminders for it stop.`
+      ctx.record = {
+        ...ctx.record,
+        statuses: { ...ctx.record.statuses, [deadline.id]: { status: 'done', done_at: new Date().toISOString(), done_by: 'founder' } },
+      }
+      ctx.record = logActivity(ctx.record, 'agent', 'Marked done', `${deadline.id} (founder said it is filed)`)
+      call(ctx, 'mark_done', `Marked ${deadline.short} (${formatDate(deadline.due_date)}) done`)
+      return `${deadline.short} due ${formatDate(deadline.due_date)} is marked done; its reminders stop.`
     }
-    case 'find_ca': {
-      const matches = matchCAs(company, deadlines, CAS, input.budget).slice(0, 3)
-      if (!matches.length) {
-        ctx.calls.push({ name: 'find_ca', summary: 'No firms in the directory', ok: true })
-        return 'The CA directory is not open yet, so there are no firms for me to match you with. You can still give your own CA a scoped share link from the Share page.'
+    case 'reopen': {
+      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status === 'done'), str('item') || ctx.message)
+      if (!deadline) {
+        call(ctx, 'reopen', 'No matching done deadline', false)
+        return 'Nothing marked done matched that.'
       }
-      ctx.actions.push({ label: 'See all matched CAs', to: '/ca' })
-      ctx.calls.push({ name: 'find_ca', summary: `Scored ${CAS.length} accountants`, ok: true })
+      const statuses = { ...ctx.record.statuses }
+      delete statuses[deadline.id]
+      ctx.record = logActivity({ ...ctx.record, statuses }, 'agent', 'Reopened', deadline.id)
+      call(ctx, 'reopen', `Reopened ${deadline.short}`)
+      return `${deadline.short} is open again and its reminders resume.`
+    }
+    case 'tick_document': {
+      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status !== 'done'), str('item'))
+      const doc = findDoc(str('document'))
+      if (!deadline || !doc || !deadline.documents.includes(doc)) {
+        call(ctx, 'tick_document', 'No matching checklist item', false)
+        return deadline ? `That filing's checklist has: ${deadline.documents.join(', ')}.` : 'No open deadline matched that.'
+      }
+      const have = args.have !== false
+      const current = ctx.record.ticked[deadline.id] ?? []
+      const next = have ? [...new Set([...current, doc])] : current.filter((d) => d !== doc)
+      ctx.record = { ...ctx.record, ticked: { ...ctx.record.ticked, [deadline.id]: next } }
+      call(ctx, 'tick_document', `${have ? 'Ticked' : 'Unticked'} ${DOC_LABELS[doc]} for ${deadline.short}`)
+      return `${DOC_LABELS[doc]} is now ${have ? 'held' : 'missing'} for ${deadline.short}.`
+    }
+
+    // --- Documents ------------------------------------------------------
+    case 'draft_documents':
+      return runDraft(ctx, { scope: str('scope') || undefined, query: str('query') || undefined, item: str('item') || undefined })
+    case 'list_documents': {
+      const folders = new Map<string, number>()
+      for (const f of ctx.record.generated) {
+        const dir = f.path.split('/').slice(0, -1).join('/')
+        folders.set(dir, (folders.get(dir) ?? 0) + 1)
+      }
+      action(ctx, 'Open the compiled folders', '/documents')
+      call(ctx, 'list_documents', `${folders.size} folders, ${ctx.record.generated.length} files`)
+      return [...folders.entries()].map(([dir, n]) => `${dir} (${plural(n, 'file')})`).join('\n') || 'No documents compiled yet.'
+    }
+
+    // --- Reminders ------------------------------------------------------
+    case 'run_reminders': {
+      const sent = runReminderJob(deadlines(ctx), ctx.today, ctx.record.reminders, company, company.email || 'no email on file')
+      if (sent.length) ctx.record = { ...ctx.record, reminders: [...sent, ...ctx.record.reminders].slice(0, 200) }
+      action(ctx, 'See the reminder log', '/reminders')
+      call(ctx, 'run_reminders', sent.length ? `Queued ${plural(sent.length, 'reminder')}` : 'Nothing due today')
+      return sent.length ? sent.map((r) => `${r.stage}: ${r.subject}`).join('\n') : 'No reminder is due today; nothing was sent twice.'
+    }
+    case 'list_reminders': {
+      const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 25)
+      call(ctx, 'list_reminders', `${ctx.record.reminders.length} in the log`)
+      return ctx.record.reminders.slice(0, limit).map((r) => `${r.sent_at.slice(0, 10)} ${r.stage}: ${r.subject}`).join('\n') || 'The reminder log is empty.'
+    }
+
+    // --- Sharing (proposals only) ---------------------------------------
+    case 'list_shares': {
+      action(ctx, 'Manage share links', '/share')
+      call(ctx, 'list_shares', `${activeShares(ctx.record).length} active links`)
+      return (
+        ctx.record.shares
+          .map((s) => `[${s.id}] ${s.permission} — scope ${s.scope === 'all' ? 'all' : s.scope.join(', ')} — ${s.revoked_at ? 'revoked' : s.expires_at ? `expires ${s.expires_at}` : 'no expiry'}`)
+          .join('\n') || 'No share links yet.'
+      )
+    }
+    case 'propose_share': {
+      const permission: SharePermission = args.permission === 'mark_done' ? 'mark_done' : 'view'
+      const scopeArg = Array.isArray(args.scope) ? (args.scope as unknown[]).filter((g): g is ObligationGroup => GROUPS.includes(g as ObligationGroup)) : []
+      const scope: ObligationGroup[] | 'all' = scopeArg.length ? scopeArg : 'all'
+      const days = Number(args.expires_in_days)
+      const expires_at = Number.isFinite(days) && days > 0 ? addDays(ctx.today, Math.min(Math.round(days), 365)) : null
+      return propose(ctx, {
+        id: newId(),
+        tool: 'create_share',
+        args: { permission, scope, expires_at },
+        summary: `Create a ${permission === 'mark_done' ? 'view-and-mark-done' : 'view-only'} link for your CA covering ${scope === 'all' ? 'every filing' : scope.join(', ')}${expires_at ? `, expiring ${formatDate(expires_at)}` : ''}`,
+        created_at: new Date().toISOString(),
+      })
+    }
+    case 'propose_revoke_share': {
+      const active = activeShares(ctx.record)
+      const target = active.find((s) => s.id === str('share_id')) ?? (active.length === 1 || str('share_id') === 'latest' ? active[0] : undefined)
+      if (!target) {
+        call(ctx, 'propose_revoke_share', active.length ? 'Which link? Several are active' : 'No active links', false)
+        return active.length ? `Several links are active; name one: ${active.map((s) => s.id).join(', ')}` : 'There is no active share link.'
+      }
+      return propose(ctx, {
+        id: newId(),
+        tool: 'revoke_share',
+        args: { share_id: target.id },
+        summary: `Revoke the ${target.permission === 'mark_done' ? 'view-and-mark-done' : 'view-only'} link created ${target.created_at.slice(0, 10)}`,
+        created_at: new Date().toISOString(),
+      })
+    }
+
+    // --- CA, activity, settings, autopilot ------------------------------
+    case 'find_ca': {
+      const matches = matchCAs(deriveProfile(ctx.record.knowledge), deadlines(ctx), CAS, ctx.record.budget).slice(0, 3)
+      if (!matches.length) {
+        call(ctx, 'find_ca', 'No firms in the directory')
+        return 'The CA directory is not open yet, so there are no firms to match. The founder can still give their own CA a share link.'
+      }
+      action(ctx, 'See all matched CAs', '/ca')
+      call(ctx, 'find_ca', `Scored ${CAS.length} accountants`)
       return matches.map((m) => `${m.ca.name} (${m.ca.city}, score ${m.score}): ${m.reasons[0]}`).join('\n')
     }
-    case 'answer':
-    default: {
-      ctx.calls.push({ name: 'answer', summary: 'Replied from the record', ok: true })
-      return String(args.text ?? '')
+    case 'read_activity': {
+      const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 30)
+      call(ctx, 'read_activity', `Read ${Math.min(limit, ctx.record.activity.length)} entries`)
+      return ctx.record.activity.slice(0, limit).map((a) => `${a.at.slice(0, 16).replace('T', ' ')} ${a.actor}: ${a.action} — ${a.detail}`).join('\n') || 'Nothing in the activity log yet.'
     }
+    case 'set_budget': {
+      const budget = str('budget') as BudgetBand
+      if (!BUDGETS.includes(budget)) {
+        call(ctx, 'set_budget', 'Unknown budget band', false)
+        return `Budget must be one of ${BUDGETS.join(', ')}.`
+      }
+      ctx.record = logActivity({ ...ctx.record, budget }, 'agent', 'Set CA budget', budget)
+      call(ctx, 'set_budget', `Budget set to ${budget}`)
+      return `CA budget set to ${budget}.`
+    }
+    case 'set_autopilot': {
+      const enabled = args.enabled !== false
+      ctx.record = logActivity({ ...ctx.record, autopilot: { ...ctx.record.autopilot, enabled } }, 'agent', enabled ? 'Autopilot on' : 'Autopilot off', '')
+      call(ctx, 'set_autopilot', enabled ? 'Autopilot switched on' : 'Autopilot switched off')
+      return enabled ? 'Autopilot is on: I check in every morning at 09:00 IST.' : 'Autopilot is off: I will only act when asked.'
+    }
+    case 'run_autopilot': {
+      const { record, report } = runAutopilot(ctx.record, ctx.today, { force: true })
+      // The briefing is the autopilot's own chat message; this turn's reply summarises it instead.
+      ctx.record = report.briefing ? { ...record, agentMessages: record.agentMessages.filter((m) => m.id !== report.briefing?.id) } : record
+      if (report.drafted_files) ctx.drafted = { files: report.drafted_files, folders: report.drafted_folders, missing: report.missing }
+      call(ctx, 'run_autopilot', `${plural(report.reminders, 'reminder')}, ${plural(report.drafted_folders, 'folder')} drafted`)
+      return report.briefing?.text ?? (report.skipped === 'empty' ? 'The record is empty, so there is nothing to check yet.' : 'Checked: nothing is due, overdue or needs drafting.')
+    }
+    default:
+      call(ctx, name || 'unknown', 'Unknown tool', false)
+      return `There is no tool called ${name}.`
   }
 }
 
@@ -285,13 +526,11 @@ export function executeTool(ctx: Ctx, name: AgentToolName, args: Record<string, 
 function greeting(kb: Knowledge) {
   const known = Object.keys(kb.facts).length
   if (!known) {
-    return 'I keep a record of your business and turn it into a compliance calendar. To start: what is the company called, what type is it, and which state is it in? You can write it all in one line.'
+    return 'I keep a record of your business and run the tracker from it. To start: what is the company called, what type is it, and which state is it in? You can write it all in one line.'
   }
   const missing = missingFacts(kb)
-  if (missing.length) {
-    return `I have ${known} facts on file. To finish the picture: ${missing[0].ask}`
-  }
-  return 'Your record is complete. Ask me what is due, tell me a change (“we now have 25 employees”), or ask me to draft the documents for any filing.'
+  if (missing.length) return `I have ${known} facts on file. To finish the picture: ${missing[0].ask}`
+  return 'Your record is complete. Ask what is due, tell me a change (“we now have 25 employees”), say when something is filed, or ask me to draft, remind, share or run the morning check.'
 }
 
 function summaryOf(kb: Knowledge): string[] {
@@ -305,161 +544,161 @@ function summaryOf(kb: Knowledge): string[] {
   return bits
 }
 
-export function localBrain(input: AgentInput): AgentReply {
-  const ctx: Ctx = { input, knowledge: input.knowledge, calls: [], actions: [], changes: [], errors: [] }
-  const message = input.message.trim()
+function brainReply(ctx: Ctx): string {
+  const message = ctx.message.trim()
   const lower = message.toLowerCase()
-  const extracted = extractFacts(message, ctx.knowledge)
-  const hasFacts = Object.keys(extracted.patch).length > 0
-  let reply = ''
 
-  if (hasFacts) {
+  if (/\b(revoke|remove access|stop sharing|kill the link|disable the link)\b/.test(lower)) {
+    return executeTool(ctx, 'propose_revoke_share', { share_id: 'latest' })
+  }
+  if (/\bshare\b.*\b(ca|accountant|link|calendar)\b|\bshare link\b|give .*(ca|accountant).* access|send .* to (my |our )?(ca|accountant)/.test(lower)) {
+    const permission = /mark|tick|update|edit/.test(lower) ? 'mark_done' : 'view'
+    const days = lower.match(/(\d{1,3})\s*days?/)
+    const scope = GROUPS.filter((g) => lower.includes(g.replace('_', ' ')) || (g === 'gst' && /\bgst\b/.test(lower)))
+    return executeTool(ctx, 'propose_share', { permission, scope, expires_in_days: days ? Number(days[1]) : 30 })
+  }
+  if (/\b(take care of|handle (it|this|everything)|sort (it|this|everything) out|do (it|everything) for me|manage (it|everything))\b/.test(lower)) {
+    // Everything that is safe to do alone, then what still needs the founder.
+    const drafted = executeTool(ctx, 'draft_documents', { scope: 'due_soon' })
+    const reminded = executeTool(ctx, 'run_reminders', {})
+    const overdue = deadlines(ctx).filter((d) => d.status !== 'done' && (d.days_left ?? 0) < 0)
+    const missing = missingFacts(ctx.record.knowledge)
+    return [
+      drafted.startsWith('No open filing') ? 'Nothing is due in the next 30 days that needs drafting.' : drafted,
+      reminded.startsWith('No reminder') ? 'No reminder was due today.' : `Queued ${plural(reminded.split('\n').length, 'reminder')}.`,
+      overdue.length ? `Still needs you: ${overdue.map((d) => d.short).join(', ')} ${overdue.length === 1 ? 'is' : 'are'} overdue — tell me once filed.` : '',
+      missing.length ? `To do more, I need: ${missing[0].ask}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (/\b(autopilot|morning check|daily check|check in|run everything|run the day)\b/.test(lower)) {
+    if (/\b(off|pause|stop|disable)\b/.test(lower)) return executeTool(ctx, 'set_autopilot', { enabled: false })
+    if (/\b(turn on|enable|resume|switch on)\b/.test(lower)) return executeTool(ctx, 'set_autopilot', { enabled: true })
+    return executeTool(ctx, 'run_autopilot', {})
+  }
+
+  // Status changes before facts: "we filed the AGM from our office" is about the AGM, not the office.
+  if (/\b(reopen|undo|not (actually )?(done|filed)|mark .* (open|not done))\b/.test(lower)) return executeTool(ctx, 'reopen', { item: message })
+  if (/mark .*(done|filed|paid)|\b(i|we) (have |already )?(filed|paid|submitted|completed)\b|\bis (done|filed)\b/.test(lower)) {
+    return executeTool(ctx, 'mark_done', { item: message })
+  }
+
+  const extracted = extractFacts(message, ctx.record.knowledge)
+  if (Object.keys(extracted.patch).length) {
     runUpdate(ctx, extracted.patch, 'agent')
     const justNow = ctx.changes.map((c) => `${c.label.toLowerCase()} ${c.to}`).join(', ')
-    const missing = missingFacts(ctx.knowledge)
-    reply = ctx.changes.length
-      ? `Saved: ${justNow}.${ctx.errors.length ? ` I skipped ${ctx.errors.map((e) => e.message).join(' ')}` : ''}${missing.length ? ` Next: ${missing[0].ask}` : ' Your record is complete.'}`
+    const missing = missingFacts(ctx.record.knowledge)
+    return ctx.changes.length
+      ? `Saved: ${justNow}.${ctx.errors.length ? ` I skipped ${ctx.errors.map((e) => e.message).join(' ')}` : ''}${missing.length ? ` Next: ${missing[0].ask}` : ' Your record is complete and the calendar is up to date.'}`
       : `I already had that.${missing.length ? ` Still needed: ${missing[0].ask}` : ''}`
-  } else if (/draft|compile|prepare|paperwork|documents? for|generate/.test(lower)) {
-    const result = runDraft(ctx, { query: message, scope: /all|everything|every|whole year/.test(lower) ? 'all' : undefined })
-    reply = /\d+ files/.test(result) ? `Done: ${result}. Every file carries a DRAFT mark; I filled them from what I know.` : result
-    if (ctx.drafted?.missing.length) reply += ` Missing from the record: ${ctx.drafted.missing.join(', ')}.`
-  } else if (/mark .*(done|filed)|i (already )?filed|completed/.test(lower)) {
-    const result = executeTool(ctx, 'mark_done', { query: message })
-    reply = result
-  } else if (/\bdue\b|calendar|deadline|what.?s next|next up|when is/.test(lower)) {
-    const result = executeTool(ctx, 'get_calendar', {})
-    const lines = result.split('\n').filter(Boolean)
-    reply = lines.length ? `Next up:\n${lines.slice(0, 4).map((l) => `• ${l}`).join('\n')}` : 'Nothing dated is open right now.'
-  } else if (/explain|what does|what is .*(mean|for)|why|mean\b/.test(lower)) {
-    reply = executeTool(ctx, 'explain_item', { query: message, question: message })
-  } else if (/\bca\b|accountant|chartered/.test(lower)) {
-    reply = `Here is who fits your filings:\n${executeTool(ctx, 'find_ca', {})}`
-  } else if (/^(hi|hello|hey|namaste)\b/.test(lower) || lower.length < 4) {
-    reply = greeting(ctx.knowledge)
-  } else if (/what do you know|profile|record|summary|remember/.test(lower)) {
-    const known = Object.keys(ctx.knowledge.facts).length
-    const bits = summaryOf(ctx.knowledge)
-    reply = `${bits.length ? `I have ${bits.join(' · ')}. ` : ''}${known} facts on file.${suggestedFacts(ctx.knowledge).length ? ` I could also note: ${suggestedFacts(ctx.knowledge)[0].label.toLowerCase()}.` : ''}`
-  } else {
-    const missing = missingFacts(ctx.knowledge)
-    reply = missing.length
-      ? `I did not find a company fact in that. ${missing[0].ask}`
-      : 'I can update company facts, explain a filing, mark something done, draft documents or find a CA. For anything outside compliance, ask a CA.'
   }
 
-  return {
-    reply,
-    knowledge: ctx.knowledge,
-    calls: ctx.calls,
-    actions: ctx.actions,
-    changes: ctx.changes,
-    errors: ctx.errors,
-    missing: missingFacts(ctx.knowledge).map((f) => ({ key: f.key, label: f.label, ask: f.ask })),
-    model: { configured: false, connected: false, engine: 'on-server deterministic brain' },
-    drafted: ctx.drafted,
-    mark_done: ctx.markDone,
+  if (/draft|compile|prepare|paperwork|documents? for|generate/.test(lower)) {
+    const scope = /all|everything|every|whole year/.test(lower) ? 'all' : /overdue|late/.test(lower) ? 'overdue' : /soon|this month|upcoming/.test(lower) ? 'due_soon' : undefined
+    return executeTool(ctx, 'draft_documents', { scope, query: message })
   }
+  if (/\b(remind|reminders?)\b/.test(lower)) {
+    if (/\b(log|history|sent|list|show)\b/.test(lower)) return executeTool(ctx, 'list_reminders', {})
+    const result = executeTool(ctx, 'run_reminders', {})
+    return result.startsWith('No reminder') ? result : `Queued today’s reminders:\n${result}`
+  }
+  if (/\b(activity|history|what happened|audit|log)\b/.test(lower)) return `Latest activity:\n${executeTool(ctx, 'read_activity', { limit: 8 })}`
+  if (/\b(overdue|late|missed)\b/.test(lower)) return executeTool(ctx, 'get_calendar', { filter: 'overdue' })
+  if (/\b(checklist|papers|which documents|what documents)\b/.test(lower)) return executeTool(ctx, 'get_deadline', { item: message })
+  if (/\b(compiled|folders|my documents|list documents)\b/.test(lower)) return executeTool(ctx, 'list_documents', {})
+  if (/\bdue\b|calendar|deadline|what.?s next|next up|when is|owe/.test(lower)) {
+    return executeTool(ctx, 'get_calendar', { filter: /month|30 days|soon/.test(lower) ? 'next_30' : 'open', limit: 5 })
+  }
+  if (/\b(obligations?|what applies|which filings)\b/.test(lower)) return executeTool(ctx, 'list_obligations', {})
+  if (/explain|what does|what is .*(mean|for)|why|mean\b/.test(lower)) return executeTool(ctx, 'explain_item', { item: message, question: message })
+  if (/\bca\b|accountant|chartered/.test(lower)) return `Here is who fits your filings:\n${executeTool(ctx, 'find_ca', {})}`
+  if (/^(hi|hello|hey|namaste)\b/.test(lower) || lower.length < 4) return greeting(ctx.record.knowledge)
+  if (/what do you know|profile|record|summary|remember/.test(lower)) {
+    const known = Object.keys(ctx.record.knowledge.facts).length
+    const bits = summaryOf(ctx.record.knowledge)
+    const suggested = suggestedFacts(ctx.record.knowledge)
+    call(ctx, 'read_company', `Read ${known} facts`)
+    return `${bits.length ? `I have ${bits.join(' · ')}. ` : ''}${known} facts on file.${suggested.length ? ` I could also note: ${suggested[0].label.toLowerCase()}.` : ''}`
+  }
+  const missing = missingFacts(ctx.record.knowledge)
+  return missing.length
+    ? `I did not find a company fact in that. ${missing[0].ask}`
+    : 'I can update the record, show what is due, draft filings, tick checklists, mark things filed, run reminders, share with your CA or run the morning check. For anything outside compliance, ask a CA.'
 }
 
 // ---------------------------------------------------------------------------
 // The model path
 
-const SYSTEM_PROMPT = `You are the compliance agent inside a tracker for Indian founders. You keep a record of the business and draft its filings.
+const FACT_KEYS = FIELDS.map((f) => f.key).join(', ')
 
-Rules you must follow:
-- Deadlines, applicability and penalties come only from the tools. Never invent a date, a form number or a penalty.
-- Update the record only from what the founder actually said. If a value is unclear, ask a short question instead of guessing.
-- Call update_company with facts as { "key": value } using exactly the fact keys in the record.
-- Before drafting, you may need facts. Draft with draft_documents; if fields are missing, say which ones in plain words.
-- Reply in short sentences a first-time founder can follow. At most one question per reply.
-- You are guidance, not legal advice. Point to a CA for anything outside compliance.
-- Never give legal advice, never claim to file anything.
-`
+const SYSTEM_PROMPT = `You are the agent that runs a compliance tracker for an Indian startup. You live on the company's own server, next to its company record, and you manage the whole tracker through tools: the company record, obligations, calendar, deadline checklists, document drafts, reminders, share links for the CA, the activity log and the daily autopilot.
+
+How to work:
+- Pull data with tools whenever you need it (read_company, get_calendar, get_deadline, list_documents, list_reminders, list_shares, read_activity). Do not guess what is in the record.
+- Deadlines, applicability and penalties come only from tools. Never invent a date, form number or penalty.
+- Update the record only from what the founder actually said, with update_company and the exact fact keys. If a value is unclear, ask one short question.
+- Call mark_done only when the founder says a filing is filed or paid. Use the deadline id from get_calendar when you have it.
+- Sharing the record or revoking a link is never done directly: propose_share / propose_revoke_share create a request the founder approves. Say that it is waiting for approval.
+- When the founder asks you to "handle it", "take care of everything" or similar, do the safe things yourself: draft what is due soon, run reminders, tick documents they said they have, and report what still needs them.
+- Reply in short sentences a first-time founder can follow. At most one question per reply. Guidance, not legal advice; you never file on a government portal.`
+
+const obj = (properties: Record<string, unknown> = {}, required: string[] = []) => ({ type: 'object', properties, ...(required.length ? { required } : {}) })
+const tool = (name: string, description: string, parameters = obj()) => ({ type: 'function', function: { name, description, parameters } })
+const item = { item: { type: 'string', description: 'Deadline id from get_calendar (best), or the filing name, e.g. "AGM" or "GSTR-3B".' } }
 
 const TOOL_SPECS = [
-  {
-    type: 'function',
-    function: {
-      name: 'update_company',
-      description: 'Save validated facts about the company. Use only facts the founder stated.',
-      parameters: {
-        type: 'object',
-        properties: {
-          facts: {
-            type: 'object',
-            description: 'Fact key to value. Keys: legal_name, entity, state, cin, pan, gstin, incorporated_on, address, premises, website, contact_email, contact_phone, directors, employees, authorised_signatory, turnover, authorised_capital, paid_up_capital, fy_end, gst_registered, epf_registered, esic_registered, professional_tax_number, shop_licence_number, foreign_investment, investors, last_allotment_on, sells, interstate',
-            additionalProperties: true,
-          },
-        },
-        required: ['facts'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'draft_documents',
-      description: 'Draft the documents needed for one filing, or for all open filings.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Filing name the founder mentioned, for example "AGM" or "DIR-3 KYC".' },
-          scope: { type: 'string', enum: ['all', 'overdue'] },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_calendar',
-      description: 'Read the open deadlines with authority and penalty.',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'list_obligations',
-      description: 'List the obligations that apply to this company.',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'explain_item',
-      description: 'Explain one filing using only its stored record.',
-      parameters: { type: 'object', properties: { item: { type: 'string' } }, required: ['item'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'mark_done',
-      description: 'Mark one deadline done. Use only when the founder says it is filed.',
-      parameters: { type: 'object', properties: { item: { type: 'string' } }, required: ['item'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'find_ca',
-      description: 'Find accountants matched to this company.',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  { type: 'function', function: { name: 'read_company', description: 'Read the facts on file.', parameters: { type: 'object', properties: {} } } },
+  tool('read_company', 'Read every fact on the company record, with where it came from, and which required facts are missing.'),
+  tool(
+    'update_company',
+    'Save validated facts the founder stated.',
+    obj({ facts: { type: 'object', description: `Fact key to value. Keys: ${FACT_KEYS}`, additionalProperties: true } }, ['facts']),
+  ),
+  tool('list_obligations', 'List the obligations that apply, with the reason each applies.'),
+  tool(
+    'get_calendar',
+    'Read dated deadlines with id, authority, due date, urgency, status and penalty.',
+    obj({ filter: { type: 'string', enum: ['open', 'overdue', 'next_30', 'done', 'events'] }, limit: { type: 'number' } }),
+  ),
+  tool('get_deadline', 'Read one deadline in full: reason, how to file, checklist state of each document, reminders logged.', obj(item, ['item'])),
+  tool('explain_item', 'Explain one filing in plain words from its stored record.', obj({ ...item, question: { type: 'string' } }, ['item'])),
+  tool('mark_done', 'Mark one deadline done. Only when the founder says it is filed or paid. Stops its reminders.', obj(item, ['item'])),
+  tool('reopen', 'Reopen a deadline that was marked done by mistake.', obj(item, ['item'])),
+  tool(
+    'tick_document',
+    'Mark a checklist document as held (have=true) or missing (have=false) for one deadline.',
+    obj({ ...item, document: { type: 'string', description: `Document key: ${Object.keys(DOC_LABELS).join(', ')}` }, have: { type: 'boolean' } }, ['item', 'document']),
+  ),
+  tool(
+    'draft_documents',
+    'Draft the documents for one filing (item) or a whole scope, into the Documents folders.',
+    obj({ ...item, scope: { type: 'string', enum: ['all', 'overdue', 'due_soon'] } }),
+  ),
+  tool('list_documents', 'List the compiled document folders.'),
+  tool('run_reminders', 'Run today’s reminder job. Idempotent: never sends the same reminder twice.'),
+  tool('list_reminders', 'Read the reminder log, newest first.', obj({ limit: { type: 'number' } })),
+  tool('list_shares', 'List the CA share links and their state.'),
+  tool(
+    'propose_share',
+    'Propose a share link for the CA. The founder must approve it.',
+    obj({
+      permission: { type: 'string', enum: ['view', 'mark_done'] },
+      scope: { type: 'array', items: { type: 'string', enum: GROUPS }, description: 'Omit for every filing.' },
+      expires_in_days: { type: 'number' },
+    }),
+  ),
+  tool('propose_revoke_share', 'Propose revoking a share link. The founder must approve it.', obj({ share_id: { type: 'string', description: 'Id from list_shares, or "latest".' } }, ['share_id'])),
+  tool('find_ca', 'Find accountants matched to this company.'),
+  tool('read_activity', 'Read the activity log: record edits, shares, CA actions, autopilot runs.', obj({ limit: { type: 'number' } })),
+  tool('set_budget', 'Set the yearly CA budget band.', obj({ budget: { type: 'string', enum: BUDGETS } }, ['budget'])),
+  tool('set_autopilot', 'Switch the daily 09:00 IST autopilot on or off.', obj({ enabled: { type: 'boolean' } }, ['enabled'])),
+  tool('run_autopilot', 'Run the morning check now: reminders, drafts for anything due soon, and a summary.'),
 ]
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string; tool_call_id?: string; tool_calls?: unknown }
+type ModelResult = { content: string; tool_calls: { id: string; name: string; args: Record<string, unknown> }[] }
 
-async function callModel(
-  env: ModelEnv,
-  messages: ChatMessage[],
-  withTools: boolean,
-): Promise<{ content: string; tool_calls: { id: string; name: string; args: Record<string, unknown> }[] } | null> {
+async function callModel(env: ModelEnv, messages: ChatMessage[]): Promise<ModelResult | null> {
   const baseUrl = env.MODEL_BASE_URL?.replace(/\/$/, '')
   if (!baseUrl) return null
   try {
@@ -472,99 +711,208 @@ async function callModel(
       body: JSON.stringify({
         model: env.MODEL_NAME ?? 'local-model',
         messages,
-        ...(withTools ? { tools: TOOL_SPECS, tool_choice: 'auto' } : {}),
+        tools: TOOL_SPECS,
+        tool_choice: 'auto',
         temperature: 0.2,
-        max_tokens: 500,
+        max_tokens: 800,
       }),
       signal: AbortSignal.timeout(MODEL_TIMEOUT),
     })
     if (!res.ok) return null
     const body = (await res.json()) as {
-      choices?: { message?: { content?: string; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[]
+      choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string | Record<string, unknown> } }[] } }[]
     }
     const message = body.choices?.[0]?.message
     if (!message) return null
-    const calls = (message.tool_calls ?? []).map((call, index) => ({
-      id: call.id ?? `call-${index}`,
-      name: call.function?.name ?? '',
-      args: (() => {
+    const calls = (message.tool_calls ?? []).map((c, index) => {
+      const raw = c.function?.arguments
+      let args: Record<string, unknown> = {}
+      if (raw && typeof raw === 'object') args = raw
+      else if (typeof raw === 'string') {
         try {
-          return JSON.parse(call.function?.arguments ?? '{}') as Record<string, unknown>
+          const parsed = JSON.parse(raw) as unknown
+          if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>
         } catch {
-          return {}
+          /* malformed arguments: the tool reports what it needs */
         }
-      })(),
-    }))
+      }
+      return { id: c.id ?? `call-${index}`, name: c.function?.name ?? '', args }
+    })
     return { content: message.content ?? '', tool_calls: calls }
   } catch {
     return null
   }
 }
 
-/** The agent loop: at most three model turns, every tool call validated. */
+function situation(ctx: Ctx): string {
+  const all = deadlines(ctx)
+  const s = summarise(all)
+  const overdue = all.filter((d) => d.status !== 'done' && (d.days_left ?? 0) < 0).length
+  const name = factValue<string>(ctx.record.knowledge, 'legal_name')
+  return [
+    `Today is ${ctx.today}.`,
+    `Company: ${name ?? 'not named yet'}. ${Object.keys(ctx.record.knowledge.facts).length} facts on file; ${missingFacts(ctx.record.knowledge).length} required facts missing.`,
+    `Calendar: ${s.total} deadlines, ${s.urgent} urgent, ${overdue} overdue. ${ctx.record.generated.length} drafted files. ${activeShares(ctx.record).length} active share links. ${ctx.record.pending.length} actions awaiting approval. Autopilot ${ctx.record.autopilot.enabled ? 'on' : 'off'}.`,
+  ].join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// One turn
+
+function newCtx(input: AgentInput): Ctx {
+  return {
+    record: input.record,
+    message: input.message.trim(),
+    today: input.today ?? input.record.today,
+    language: input.language ?? 'en',
+    calls: [],
+    actions: [],
+    changes: [],
+    errors: [],
+    proposed: [],
+  }
+}
+
+function finish(ctx: Ctx, reply: string, model: ModelStatus, engineLabel: string, founderAt: string): AgentReply {
+  const founder: AgentChatMessage = { id: newId(), role: 'founder', text: ctx.message, at: founderAt }
+  const agent: AgentChatMessage = {
+    id: newId(),
+    role: 'agent',
+    text: reply,
+    at: new Date().toISOString(),
+    calls: ctx.calls,
+    actions: ctx.actions,
+    changes: ctx.changes.map((c) => ({ label: c.label, to: c.to })),
+    engine: engineLabel,
+  }
+  return {
+    reply,
+    record: addMessages(ctx.record, [founder, agent]),
+    calls: ctx.calls,
+    actions: ctx.actions,
+    changes: ctx.changes,
+    errors: ctx.errors,
+    missing: missingFacts(ctx.record.knowledge).map((f) => ({ key: f.key, label: f.label, ask: f.ask })),
+    model,
+    drafted: ctx.drafted,
+    proposed: ctx.proposed,
+  }
+}
+
+const BRAIN_STATUS: ModelStatus = { configured: false, connected: false, engine: 'on-server deterministic brain' }
+
+/** The deterministic engine; also runs in the browser when the Worker is unreachable. */
+export function localBrain(input: AgentInput, engineLabel = BRAIN_STATUS.engine): AgentReply {
+  const founderAt = new Date().toISOString()
+  const ctx = newCtx(input)
+  const reply = brainReply(ctx)
+  return finish(ctx, reply, BRAIN_STATUS, engineLabel, founderAt)
+}
+
+/** The agent loop: up to six model steps, every tool call validated. */
 export async function runAgent(input: AgentInput, env: ModelEnv): Promise<AgentReply> {
   const status = await modelStatus(env)
   if (!status.configured || !status.connected) return localBrain(input)
 
-  const ctx: Ctx = { input, knowledge: input.knowledge, calls: [], actions: [], changes: [], errors: [] }
+  const founderAt = new Date().toISOString()
+  const ctx = newCtx(input)
+  const history = input.record.agentMessages
+    .filter((m) => m.id !== 'greeting')
+    .slice(-10)
+    .map((m) => ({ role: m.role === 'founder' ? ('user' as const) : ('assistant' as const), content: maskIdentifiers(m.text) }))
   const messages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'system', content: `Company record:\n${knowledgeForPrompt(ctx.knowledge)}` },
-    ...input.history.slice(-8).map((m) => ({ role: m.role === 'founder' ? ('user' as const) : ('assistant' as const), content: m.text })),
-    // The prompt only ever sees the masked message.
-    { role: 'user', content: maskIdentifiers(input.message) },
+    { role: 'system', content: `${situation(ctx)}\n\nCompany record:\n${maskIdentifiers(knowledgeForPrompt(ctx.record.knowledge))}` },
+    ...history,
+    // The prompt only ever sees masked identifiers.
+    { role: 'user', content: maskIdentifiers(ctx.message) },
   ]
 
   let reply = ''
-  for (let step = 0; step < 3; step++) {
-    const result = await callModel(env, messages, true)
+  for (let step = 0; step < MAX_MODEL_STEPS; step++) {
+    const result = await callModel(env, messages)
     if (!result) break
     if (!result.tool_calls.length) {
       reply = result.content.trim()
       break
     }
-    messages.push({ role: 'assistant', content: result.content ?? '', tool_calls: result.tool_calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })) })
-    for (const call of result.tool_calls) {
-      const toolResult = executeTool(ctx, call.name as AgentToolName, call.args)
-      messages.push({ role: 'tool', tool_call_id: call.id, content: toolResult })
+    messages.push({
+      role: 'assistant',
+      content: result.content ?? '',
+      tool_calls: result.tool_calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })),
+    })
+    for (const c of result.tool_calls) {
+      const output = executeTool(ctx, c.name, c.args)
+      messages.push({ role: 'tool', tool_call_id: c.id, content: maskIdentifiers(output) })
     }
   }
 
-  if (!reply) {
-    // The model answered only with tool calls, or failed mid-loop: answer from the record.
-    const fallback = localBrain({ ...input, knowledge: ctx.knowledge, message: input.message })
-    return {
-      ...fallback,
-      calls: [...ctx.calls, ...fallback.calls],
-      actions: [...ctx.actions, ...fallback.actions],
-      changes: [...ctx.changes, ...fallback.changes],
-      knowledge: ctx.knowledge,
-      drafted: ctx.drafted ?? fallback.drafted,
-      model: status,
-    }
-  }
+  const label = status.model ?? 'local model'
+  if (reply) return finish(ctx, reply, status, label, founderAt)
 
-  return {
-    reply,
-    knowledge: ctx.knowledge,
-    calls: ctx.calls,
-    actions: ctx.actions,
-    changes: ctx.changes,
-    errors: ctx.errors,
-    missing: missingFacts(ctx.knowledge).map((f) => ({ key: f.key, label: f.label, ask: f.ask })),
-    model: status,
-    drafted: ctx.drafted,
-    mark_done: ctx.markDone,
-  }
+  // The model ran out of steps or failed mid-loop. Keep whatever its tools did;
+  // if it did nothing, let the deterministic brain take the whole turn.
+  if (!ctx.calls.length) return { ...localBrain(input), model: status }
+  const done = ctx.calls.filter((c) => c.ok).map((c) => c.summary)
+  return finish(ctx, done.length ? `Done: ${done.join('; ')}.` : 'I could not finish that. Try asking in a shorter way.', status, `${label} (summarised)`, founderAt)
 }
 
-/** Everything the agent knows, for the panel beside the chat. */
-export function knowledgeSnapshot(kb: Knowledge) {
-  return {
-    known: Object.keys(kb.facts).length,
-    missing: missingFacts(kb),
-    suggested: suggestedFacts(kb),
-    hasPremises: hasFact(kb, 'premises'),
-    name: factValue<string>(kb, 'legal_name'),
+// ---------------------------------------------------------------------------
+// Approvals
+
+export async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** Approve or decline one proposed action. Only the signed-in founder reaches this. */
+export async function resolvePending(
+  record: CompanyRecord,
+  id: string,
+  approve: boolean,
+): Promise<{ record: CompanyRecord; ok: boolean; message: string; share?: ShareLink }> {
+  const pending = record.pending.find((p) => p.id === id)
+  if (!pending) return { record, ok: false, message: 'That request is no longer waiting.' }
+  let next: CompanyRecord = { ...record, pending: record.pending.filter((p) => p.id !== id) }
+
+  if (!approve) {
+    next = logActivity(next, 'founder', 'Declined agent request', pending.summary)
+    next = addMessages(next, [{ id: newId(), role: 'agent', text: `Understood, I did not do it: ${pending.summary.charAt(0).toLowerCase()}${pending.summary.slice(1)}.`, at: new Date().toISOString() }])
+    return { record: next, ok: true, message: 'Declined.' }
   }
+
+  if (pending.tool === 'create_share') {
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    const share: ShareLink = {
+      id: newId(),
+      token,
+      token_hash: await sha256Hex(token),
+      permission: pending.args.permission,
+      scope: pending.args.scope,
+      expires_at: pending.args.expires_at,
+      revoked_at: null,
+      created_at: new Date().toISOString(),
+    }
+    next = { ...next, shares: [share, ...next.shares] }
+    next = logActivity(next, 'founder', 'Approved share link', pending.summary)
+    next = addMessages(next, [
+      {
+        id: newId(),
+        role: 'agent',
+        text: `Approved. The link is ready: /s/${token}\nSend it to your CA. You can revoke it any time.`,
+        at: new Date().toISOString(),
+        calls: [{ name: 'create_share', summary: 'Created share link', ok: true }],
+        actions: [{ label: 'Manage share links', to: '/share' }],
+      },
+    ])
+    return { record: next, ok: true, message: 'Share link created.', share }
+  }
+
+  const target = next.shares.find((s) => s.id === pending.args.share_id)
+  if (!target || target.revoked_at) return { record: next, ok: false, message: 'That link is already gone.' }
+  next = { ...next, shares: next.shares.map((s) => (s.id === target.id ? { ...s, revoked_at: new Date().toISOString() } : s)) }
+  next = logActivity(next, 'founder', 'Revoked share link', target.id)
+  next = addMessages(next, [{ id: newId(), role: 'agent', text: 'Approved. That share link no longer works.', at: new Date().toISOString(), calls: [{ name: 'revoke_share', summary: 'Revoked share link', ok: true }] }])
+  return { record: next, ok: true, message: 'Share link revoked.' }
 }

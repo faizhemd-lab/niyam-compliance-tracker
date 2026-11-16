@@ -15,5 +15,7 @@
       "database_id": "00000000-0000-0000-0000-000000000000"
     }
   ],
+  // The agent's autopilot: every day at 03:30 UTC (09:00 IST).
+  "triggers": { "crons": ["30 3 * * *"] },
   "observability": { "enabled": true }
 }

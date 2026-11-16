@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 
-import { modelStatus, runAgent } from '../shared/agent'
+import { modelStatus, resolvePending, runAgent } from '../shared/agent'
+import { runAutopilot } from '../shared/autopilot'
 import { CAS, RULES, RULE_VERSION } from '../shared/catalogue'
 import { compileDeadline, checklistFor } from '../shared/documents'
 import { classify, explain, extract, GATEWAY, maskIdentifiers } from '../shared/gateway'
@@ -10,12 +11,12 @@ import { matchCAs } from '../shared/matching'
 import { runReminderJob } from '../shared/reminders'
 import { evaluateRules, missingFields, profileLine } from '../shared/rules'
 import { buildCalendar, summarise } from '../shared/schedule'
-import type { AgentInput } from '../shared/agent'
+import { withDefaults, type CompanyRecord } from '../shared/record'
 import type { Company, Deadline, DocKey, Profile, ReminderEntry, ShareLink, SharePermission } from '../shared/types'
 import { applyMapping, parseCsv, proposeMapping } from '../shared/validation'
 import { createZip } from '../shared/zip'
 import { authenticatedUser } from './auth'
-import { ensureSchema, readRecord, sha256Hex, shareOwner, syncShares, writeRecord } from './db'
+import { ensureSchema, listRecords, readRecord, sha256Hex, shareOwner, syncShares, writeRecord, writeRecordIf } from './db'
 
 /**
  * The Worker behind the app. It holds the rules engine, the calendar service,
@@ -139,7 +140,26 @@ app.put('/api/record', async (c) => {
   const data = body?.data
   if (!data || typeof data !== 'object' || Array.isArray(data)) return c.json({ error: 'Send the record as { data: {} }.' }, 422, NO_STORE)
   await ensureSchema(c.env.DB)
-  const savedAt = await writeRecord(c.env.DB, auth.user.id, JSON.stringify(data))
+  // A client that sends `base` (the saved_at it last saw) never overwrites a
+  // newer save — such as the agent's or the autopilot's — without seeing it.
+  let savedAt: string
+  if ('base' in body) {
+    const base = typeof body.base === 'string' ? body.base : null
+    const written = await writeRecordIf(c.env.DB, auth.user.id, JSON.stringify(data), base)
+    if (!written) {
+      const row = await readRecord(c.env.DB, auth.user.id)
+      let current: unknown = null
+      try {
+        current = row ? JSON.parse(row.data) : null
+      } catch {
+        current = null
+      }
+      return c.json({ error: 'The record changed on the server.', code: 'conflict', data: current, saved_at: row?.updated_at ?? null }, 409, NO_STORE)
+    }
+    savedAt = written
+  } else {
+    savedAt = await writeRecord(c.env.DB, auth.user.id, JSON.stringify(data))
+  }
   const shares = Array.isArray((data as { shares?: unknown }).shares) ? ((data as { shares: { token_hash?: unknown }[] }).shares ?? []) : []
   await syncShares(
     c.env.DB,
@@ -173,31 +193,87 @@ app.post('/api/interview/message', async (c) => {
 // 1b. The agent: free-form conversation that keeps and updates the company record.
 app.get('/api/agent/status', async (c) => c.json(await modelStatus(c.env)))
 
+/**
+ * The agent's own access to the record: it loads the signed-in client's row
+ * from D1, works on it, and saves it back only if nobody else saved meanwhile.
+ * The browser sends nothing but the message.
+ */
+async function agentContext(c: Context<AppEnv>) {
+  const auth = await authFor(c)
+  if (!auth.user) return { response: auth.response }
+  if (!sameOrigin(c.req.raw, c.env)) return { response: c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE) }
+  const db = c.env.DB
+  if (!db) return { response: c.json({ error: 'The record store is not configured on this deployment.' }, 503, NO_STORE) }
+  await ensureSchema(db)
+  const row = await readRecord(db, auth.user.id)
+  let parsed: Partial<CompanyRecord> | null = null
+  if (row) {
+    try {
+      parsed = JSON.parse(row.data) as Partial<CompanyRecord>
+    } catch {
+      return { response: c.json({ error: 'The stored record could not be read.' }, 500, NO_STORE) }
+    }
+  }
+  return { db, userId: auth.user.id, record: withDefaults(parsed), base: row?.updated_at ?? null }
+}
+
+async function saveAgentRecord(db: D1Database, userId: string, record: CompanyRecord, base: string | null) {
+  const savedAt = await writeRecordIf(db, userId, JSON.stringify(record), base)
+  if (savedAt) await syncShares(db, userId, record.shares.map((s) => s.token_hash))
+  return savedAt
+}
+
+const CONFLICT = { error: 'Your record changed while the agent was working. Nothing was saved; send that again.', code: 'conflict' }
+
 app.post('/api/agent/message', async (c) => {
+  const context = await agentContext(c)
+  if (!context.record) return context.response
   const body = await readJson(c.req.raw)
   if (!body) return badJson()
   // The agent reads the raw message so it can store PAN/GSTIN in masked form;
   // masking happens again at the model boundary inside runAgent.
   const message = typeof body.message === 'string' ? body.message.slice(0, 4000).trim() : ''
-  if (!message) return c.json({ error: 'Say something for the agent to work with.' }, { status: 422 })
-  const knowledge = (body.knowledge ?? { facts: {} }) as AgentInput['knowledge']
-  if (typeof knowledge !== 'object' || !knowledge || typeof knowledge.facts !== 'object') {
-    return c.json({ error: 'Send the company record as { facts: {} }.' }, { status: 422 })
-  }
-  const history = Array.isArray(body.history) ? (body.history as AgentInput['history']).slice(-12) : []
+  if (!message) return c.json({ error: 'Say something for the agent to work with.' }, 422, NO_STORE)
   const reply = await runAgent(
     {
-      knowledge,
+      record: context.record,
       message,
-      history: history.filter((m) => m && (m.role === 'founder' || m.role === 'agent') && typeof m.text === 'string'),
-      today: typeof body.today === 'string' ? body.today : today(),
-      statuses: (body.statuses ?? {}) as Record<string, { status: 'open' | 'done' }>,
-      budget: body.budget as AgentInput['budget'],
+      today: typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : undefined,
       language: body.language === 'hi' ? 'hi' : 'en',
     },
     c.env,
   )
-  return c.json(reply)
+  const savedAt = await saveAgentRecord(context.db, context.userId, reply.record, context.base)
+  if (!savedAt) return c.json(CONFLICT, 409, NO_STORE)
+  return c.json({ ...reply, saved_at: savedAt }, 200, NO_STORE)
+})
+
+// Approve or decline something the agent proposed (share links, revocations).
+app.post('/api/agent/approve', async (c) => {
+  const context = await agentContext(c)
+  if (!context.record) return context.response
+  const body = await readJson(c.req.raw)
+  if (!body || typeof body.id !== 'string') return c.json({ error: 'Send { id, approve }.' }, 422, NO_STORE)
+  const result = await resolvePending(context.record, body.id, body.approve === true)
+  const savedAt = await saveAgentRecord(context.db, context.userId, result.record, context.base)
+  if (!savedAt) return c.json(CONFLICT, 409, NO_STORE)
+  return c.json({ ok: result.ok, message: result.message, record: result.record, saved_at: savedAt }, result.ok ? 200 : 409, NO_STORE)
+})
+
+// Run the morning check now, for the signed-in client (optionally on the simulated clock).
+app.post('/api/agent/autopilot', async (c) => {
+  const context = await agentContext(c)
+  if (!context.record) return context.response
+  const body = (await readJson(c.req.raw)) ?? {}
+  const when = typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : today()
+  const { record, report } = runAutopilot(context.record, when, { force: true })
+  const savedAt = await saveAgentRecord(context.db, context.userId, record, context.base)
+  if (!savedAt) return c.json(CONFLICT, 409, NO_STORE)
+  return c.json(
+    { record, saved_at: savedAt, report: { ...report, overdue: report.overdue.length, due_soon: report.due_soon.length } },
+    200,
+    NO_STORE,
+  )
 })
 
 app.post('/api/company', async (c) => {
@@ -440,4 +516,49 @@ app.post('/api/cron/reminders', async (c) => {
 app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404))
 app.all('*', (c) => (c.env.ASSETS ? c.env.ASSETS.fetch(c.req.raw) : c.text('Not found', 404)))
 
-export default app
+/**
+ * The daily autopilot (cron in wrangler.jsonc, 03:30 UTC = 09:00 IST). It walks
+ * every record, runs the morning check, and saves only where nobody saved in
+ * the meantime; a record that moved on is picked up again tomorrow.
+ */
+export async function runScheduledAutopilot(env: Env): Promise<{ checked: number; ran: number; conflicts: number }> {
+  const db = env.DB
+  if (!db) return { checked: 0, ran: 0, conflicts: 0 }
+  await ensureSchema(db)
+  const when = today()
+  let after = ''
+  let checked = 0
+  let ran = 0
+  let conflicts = 0
+  for (;;) {
+    const rows = await listRecords(db, after)
+    if (!rows.length) break
+    for (const row of rows) {
+      after = row.user_id
+      checked += 1
+      let parsed: Partial<CompanyRecord>
+      try {
+        parsed = JSON.parse(row.data) as Partial<CompanyRecord>
+      } catch {
+        continue
+      }
+      const { record, report } = runAutopilot(withDefaults(parsed), when)
+      if (!report.ran) continue
+      const saved = await saveAgentRecord(db, row.user_id, record, row.updated_at)
+      if (saved) ran += 1
+      else conflicts += 1
+    }
+  }
+  return { checked, ran, conflicts }
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      runScheduledAutopilot(env).then((result) => {
+        console.log('autopilot', JSON.stringify(result))
+      }),
+    )
+  },
+}

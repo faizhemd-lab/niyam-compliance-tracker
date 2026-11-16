@@ -1,14 +1,14 @@
 # Point the agent at your own model server. Ollama, llama.cpp and vLLM all
 # expose an OpenAI-compatible API, so one setting covers all three.
 #
-#   ollama pull qwen2.5:3b
+#   ollama pull qwen2.5:7b
 #   cp .dev.vars.example .dev.vars
 #
 # Without this file the agent still works: it runs its deterministic brain
 # inside the Worker, with the same tools, validation and company record.
 
 MODEL_BASE_URL=http://localhost:11434/v1
-MODEL_NAME=qwen2.5:3b
+MODEL_NAME=qwen2.5:7b
 
 # Only for a model server behind a token.
 # MODEL_API_KEY=
