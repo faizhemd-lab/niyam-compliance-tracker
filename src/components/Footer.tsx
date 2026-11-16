@@ -1,7 +1,7 @@
 import { Link } from 'react-router'
 
 import { MENU, SITE } from '../data'
-import { Logo } from './Bits'
+import { BrandName, Logo } from './Bits'
 import { Card } from './Card'
 
 export function Footer() {
@@ -42,8 +42,8 @@ export function Footer() {
             </ul>
           </div>
         </div>
-        <p aria-hidden className="display mt-12 -mb-[0.1em] text-center text-[clamp(4rem,-0.5rem+18vw,19rem)] leading-[0.8] tracking-[-0.07em] text-white select-none">
-          {SITE.name}
+        <p aria-hidden className="display mt-12 -mb-[0.1em] text-center text-[clamp(4rem,-0.5rem+18vw,19rem)] leading-[0.8] tracking-[-0.07em] normal-case text-white select-none">
+          <BrandName accent="text-violet-light" />
         </p>
         <div className="mt-5 flex flex-col items-start justify-between gap-2 border-t border-white/12 pt-4 text-xs text-night-muted sm:flex-row sm:items-center">
           <span>{SITE.event}</span>

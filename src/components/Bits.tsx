@@ -46,8 +46,25 @@ export function Logo({ wordmark = false, className, light = false }: { wordmark?
         <circle cx="16" cy="16" r="13" fill="none" stroke={light ? '#fff' : 'var(--color-violet)'} strokeWidth="2.4" />
         <circle cx="16" cy="16" r="6.5" fill={light ? '#fff' : 'var(--color-violet)'} />
       </svg>
-      {wordmark && <span className="text-lg font-semibold tracking-[-0.04em]">{SITE.name}</span>}
+      {wordmark && (
+        <span className="text-lg font-semibold tracking-[-0.04em]">
+          <BrandName accent={light ? 'text-violet-light' : 'text-violet'} />
+        </span>
+      )}
     </span>
+  )
+}
+
+/** The product name with its "AI" picked out in the accent colour. */
+export function BrandName({ accent = 'text-violet' }: { accent?: string }) {
+  const [before, ...rest] = SITE.name.split('AI')
+  if (!rest.length) return <>{SITE.name}</>
+  return (
+    <>
+      {before}
+      <span className={accent}>AI</span>
+      {rest.join('AI')}
+    </>
   )
 }
 

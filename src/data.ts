@@ -1,10 +1,10 @@
 import type { BudgetBand } from './shared/types'
 
 export const SITE = {
-  name: 'Niyam',
+  name: 'complAInce',
   product: 'Startup Compliance Tracker',
   tagline: 'Know what you owe the government, before they tell you',
-  email: 'hello@niyam.example',
+  email: 'hello@complaince.example',
   event: 'Ground Zero Buildathon · Studentpreneurs with AI Agents · Impact Hub, Hyderabad · 14 November 2026',
   notice: 'Guidance, not legal advice. Every rule carries a version and is meant to be reviewed by a practising CA before real use.',
 }

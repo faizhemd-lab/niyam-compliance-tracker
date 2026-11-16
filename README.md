@@ -1,4 +1,6 @@
-# Niyam — Startup Compliance Tracker
+# complAInce — Startup Compliance Tracker
+
+(Formerly Niyam. The Worker, D1 database and storage keys keep the `niyam` name.)
 
 An AI agent for first-time Indian founders. You talk to it in plain language;
 it keeps a record of the business on your own server, works out which
@@ -339,14 +341,29 @@ src/
 
 ## Deploy
 
-`deploy.json` points at the build output. After `bun run build`, deploy with the
-Freebuff Sites tool (or the Sites API) from this directory. A deployment cannot
-reach a model server running on your laptop: for the model path, self-host the
-Worker with the model on the same network, or leave it on the deterministic
-brain.
+The live app runs on **Cloudflare Workers**: <https://niyam.niyam-compliance-tracker.workers.dev>.
+That is the platform the code is built for — the Worker serves the SPA and the
+API, the record lives in D1, and the autopilot runs from a Cron Trigger.
+`wrangler.jsonc` already names the D1 database (`niyam-records`), the public
+`CLERK_PUBLISHABLE_KEY`, `APP_ORIGIN` and the cron.
 
-Sign-in needs four values, and the app refuses protected routes until the
-server-side two exist:
+To redeploy (Node 22+; the Cloudflare Vite plugin does not run under Bun):
+
+```sh
+npx wrangler login                 # once, in the browser
+echo VITE_CLERK_PUBLISHABLE_KEY=pk_test_... > .env.local   # once; baked into the SPA at build time
+node node_modules/vite/bin/vite.js build
+rm -f dist/niyam/.dev.vars         # the plugin copies local dev vars into the output
+npx wrangler deploy                # uses .wrangler/deploy/config.json → dist/niyam/wrangler.json
+```
+
+Do not use `scripts/postbuild.mjs` before `wrangler deploy`: it deletes the
+source maps that wrangler expects next to `dist/niyam/index.js`. The D1 schema
+creates itself on first use. A deployment cannot reach a model server running on
+your laptop: point `MODEL_BASE_URL` at a reachable server (as a Worker var) or
+leave it on the deterministic brain.
+
+Sign-in values:
 
 | Where | Name | What it is |
 | --- | --- | --- |
@@ -356,9 +373,11 @@ server-side two exist:
 | Worker var | `APP_ORIGIN` | the deployed origin, checked against the token's `azp` |
 
 `CLERK_SECRET_KEY` is not needed: session tokens are verified against the public
-key, so no privileged Clerk credential is stored. D1 comes from
-`sites_add_storage` (`DB`, binding name `DB`); the schema creates itself on first
-use.
+key, so no privileged Clerk credential is stored. Never set `ENVIRONMENT=development`
+on a deployment.
 
-The Vercel configuration (`vercel.json`) still builds the SPA for static hosting,
-but has no D1, so its `/api/record` cannot work: the hosted app belongs on Sites.
+**Vercel does not work for this app.** `vercel.json` builds the SPA, but the
+Vercel function (`api/[...route].ts`) only forwards the model variables (so
+sign-in reports `auth_unconfigured`), nested `/api/...` routes return Vercel's
+404, and there is no D1 for `/api/record`. The older Freebuff Sites preview
+(`deploy.json`) predates the agent routes.
