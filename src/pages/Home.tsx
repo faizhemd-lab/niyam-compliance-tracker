@@ -134,7 +134,7 @@ export function Home() {
 
       <PageHead
         eyebrow="What you get"
-        title="Ten pieces, one calendar"
+        title="Nine pieces, one calendar"
         intro="Everything below is built into this site. Where something is a sample or not yet built, it says so on the feature itself."
         actions={<ButtonLink to="/obligations" variant="outline" size="sm" iconRight={<ArrowUpRight className="size-4" />}>Open obligations</ButtonLink>}
       >

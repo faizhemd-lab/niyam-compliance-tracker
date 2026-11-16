@@ -264,14 +264,14 @@ export function explain(record: ExplainRecord, language: Language, question?: st
 // ---------------------------------------------------------------------------
 // Intent routing
 
-export type Intent = 'explain_item' | 'update_profile' | 'mark_done' | 'show_calendar' | 'find_ca' | 'out_of_scope'
+export type Intent = 'explain_item' | 'update_profile' | 'mark_done' | 'show_calendar' | 'share_with_ca' | 'out_of_scope'
 
 /** Free text after the interview is classified into a fixed list, then code acts. */
 export function classify(message: string): Intent {
   const t = message.toLowerCase()
   if (/mark (it |this )?(as )?done|i (already )?filed|completed it/.test(t)) return 'mark_done'
   if (/calendar|deadline|due date|when is|what is due/.test(t)) return 'show_calendar'
-  if (/\bca\b|accountant|chartered/.test(t)) return 'find_ca'
+  if (/\bca\b|accountant|chartered/.test(t)) return 'share_with_ca'
   if (/(\d+)\s*(people|employees|staff)|turnover|actually|we are (a|an)|changed|correction/.test(t)) return 'update_profile'
   if (/explain|what does|what is|mean|simple words/.test(t)) return 'explain_item'
   return 'out_of_scope'

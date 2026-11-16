@@ -37,7 +37,7 @@ export const JOURNEY = [
   { title: 'See what applies', body: '“14 obligations: 3 need attention now, 6 this quarter, 5 later.” Every row says why it applies.' },
   { title: 'Open the calendar', body: 'Each date shows the authority and the penalty, colour coded by urgency.' },
   { title: 'Prepare', body: 'Every item carries a document checklist. One click compiles drafts into an organised folder.' },
-  { title: 'Delegate', body: 'Share the calendar and folder with your CA, or get matched with one.' },
+  { title: 'Delegate', body: 'Share the calendar and folder with your CA through a secure link.' },
   { title: 'Stay on track', body: 'Reminders arrive before each deadline and keep coming daily until you mark it done.' },
 ]
 
@@ -50,9 +50,7 @@ export const FEATURES = [
   { title: 'Company database plug-in', body: 'CSV upload, header detection and a column mapping you confirm once and reuse.', status: 'Real (CSV)' },
   { title: 'Document checklist per item', body: 'Have, Missing or Can be generated, rolled up onto the calendar entry.', status: 'Real' },
   { title: 'Document compiler and folders', body: 'Draft resolutions, notices, KYC sheets, employee master and GST data, zipped by financial year.', status: 'Real' },
-  { title: 'Share with your CA', body: 'A random link, hashed at rest, with view or view-and-mark-done permission and an activity log.', status: 'Real (link)' },
-  { title: 'CA matching', body: 'Weighted scoring on specialty, location, budget, rating and availability, with reasons.', status: 'Mock directory' },
-]
+  { title: 'Share with your CA', body: 'A random link, hashed at rest, with view or view-and-mark-done permission and an activity log.', status: 'Real (link)' },]
 
 export const TRUST = [
   { title: 'Rules decide. AI talks.', body: 'Applicability, dates and penalties come from the versioned rules catalogue. The model only reads messy answers and explains records back in plain words.' },

@@ -16,7 +16,7 @@ Impact Hub, Hyderabad, 14 November 2026.
 
 | Area | Route | What it does |
 | --- | --- | --- |
-| Landing | `/` | Promise, problem, the ten features, the seven-step journey, straight answers |
+| Landing | `/` | Promise, problem, the nine features, the seven-step journey, straight answers |
 | Interview | `/interview` | Guided slot-filling chat: tap answers or free text, glossary, live profile panel |
 | Obligations | `/obligations` | Every rule that applies, with the reason written from your answers and the rule version |
 | Calendar | `/calendar` | Dated deadlines for 60 days back to 12 months ahead, colour coded, with an “on event” lane and .ics export |
@@ -63,7 +63,7 @@ The design rule is **rules decide, AI talks**:
 - **Explanations are checked for faithfulness**: every number in the answer must
   appear in the rule record, otherwise the stored plain-words text is shown.
 - **Free-text intents** are classified into a fixed list (`explain_item`,
-  `update_profile`, `mark_done`, `show_calendar`, `find_ca`, `out_of_scope`).
+  `update_profile`, `mark_done`, `show_calendar`, `share_with_ca`, `out_of_scope`).
 
 ## The rules engine
 
@@ -126,7 +126,7 @@ POST /api/deadlines/compile        { company, deadline, today, ticked }
 POST /api/folder.zip               { files }
 POST /api/share                    { permission, scope, expires_at }
 POST /api/share/revoke             { id }
-POST /api/cas/match                { profile, budget, today }
+POST /api/cas/match                { profile, budget, today }   (dormant, see below)
 POST /api/cron/reminders           { profile, statuses, today, log, company }
 ```
 
@@ -142,7 +142,7 @@ src/
     gateway.ts     model gateway: extraction, masking, explanation, intents
     documents.ts   checklists, compiler, folder tree, .ics
     reminders.ts   stages, messages, the idempotent job
-    matching.ts    weighted CA scoring with reasons
+    matching.ts    weighted CA scoring with reasons (dormant)
     validation.ts  CSV parse, header mapping, value validation
     zip.ts         stored-entry ZIP writer
   worker/index.ts  Hono routes
@@ -157,9 +157,10 @@ src/
   share links, reminder log and activity log live in `localStorage`. A share link
   therefore resolves on the device that created it; a hosted deployment stores
   the token hash server-side and resolves it anywhere.
-- **CA directory:** sample people, real scoring (specialty 40%, location and
-  language 20%, budget 15%, rating 15%, availability 10%). Payment never enters
-  the score.
+- **CA matching is paused.** The Find a CA page and its links are removed for
+  now. The scoring (`src/shared/matching.ts`), the sample directory in
+  `catalogue.ts` and `POST /api/cas/match` stay in the code, unused, so the
+  feature can come back without a rewrite.
 - **Model:** no LLM is called; see “How the AI is used”.
 - **Documents:** HTML and CSV drafts (print to PDF), not Word or PDF generation.
 - **State-specific rules** (professional tax, Shop licence) stay in the on-event
