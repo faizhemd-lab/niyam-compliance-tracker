@@ -35,11 +35,34 @@ bun install
 bun run dev        # http://localhost:5305 (Vite + the Worker in workerd)
 bun run build      # dist/client (assets) + dist/niyam/index.js (Worker)
 bun run typecheck
+bun run test       # Vitest: rules, calendar, reminders, parser, import, documents, sharing
 ```
 
 This build was verified with Node 22 running the Vite binary directly
 (`node node_modules/vite/bin/vite.js --port 5305`). The Cloudflare Vite plugin
 needs Node’s fetch and does not work under Bun’s runtime.
+
+## Tests
+
+`tests/` holds the checks chapter 15 of the handbook asks for, run with Vitest
+(`vitest.config.ts`, kept apart from the Vite config so no plugins load):
+
+- `rules.test.ts`: ten golden company profiles with hand-checked obligation
+  lists, every threshold boundary (₹20 lakh, ₹40 lakh, ₹1 crore, ₹2 crore;
+  9/10, 19/20 and 0/1 employees), catalogue completeness and penalty estimates.
+- `schedule.test.ts`: the calendar window, month-end and leap-year dates, year
+  boundaries, urgency colours and labels, and safe reconciliation after a
+  profile correction.
+- `reminders.test.ts`: a full simulated year of the daily job: no duplicates,
+  each stage once, overdue daily, stops when marked done.
+- `gateway.test.ts`: masking, amount and date parsing, extraction cases from the
+  handbook, the interview order, explanation faithfulness and intents.
+- `import-and-documents.test.ts`: messy CSVs, masked identifiers, DRAFT marks,
+  folder names, manifests and checklist states.
+- `sharing.test.ts`: token size and hashing, expiry, revocation, view-only and
+  scope limits, and `POST /api/share`.
+
+If a rule changes on purpose, update its golden profile in the same commit.
 
 ## How the AI is used — and what it is not allowed to do
 

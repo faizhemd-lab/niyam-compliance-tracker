@@ -111,15 +111,19 @@ export function effectiveSchedule(rule: Rule, profile: Profile): Schedule {
 export function penaltyExample(penalty: Penalty, turnover?: number, days = 30): string | undefined {
   if (penalty.example) return penalty.example
   const parts: number[] = []
-  if (penalty.fixed) parts.push(penalty.fixed)
   if (penalty.per_day) {
+    // A fixed fee on top of a daily fee: both are owed.
+    if (penalty.fixed) parts.push(penalty.fixed)
     let late = penalty.per_day * days
     if (penalty.cap) late = Math.min(late, penalty.cap)
     if (penalty.percent_of_turnover && turnover) late = Math.min(late, turnover * penalty.percent_of_turnover)
     parts.push(late)
   } else if (penalty.percent_of_turnover && turnover) {
+    // A fixed amount beside a share of turnover means "whichever is lower".
     const amount = turnover * penalty.percent_of_turnover
     parts.push(penalty.fixed ? Math.min(penalty.fixed, amount) : amount)
+  } else if (penalty.fixed) {
+    parts.push(penalty.fixed)
   }
   const total = parts.reduce((a, b) => a + b, 0)
   if (!total) return undefined

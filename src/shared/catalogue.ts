@@ -220,8 +220,8 @@ export const RULES: Rule[] = [
     short: 'ITR',
     authority: 'Income Tax Department',
     group: 'income_tax',
-    applies: { field: 'turnover', op: 'gt', value: 0 },
-    reason: 'Every business files an income tax return for the year.',
+    applies: { field: 'entity', op: 'in', value: ['private_limited', 'llp', 'partnership', 'proprietorship'] },
+    reason: 'Every business files an income tax return for the year, even before it has any revenue.',
     schedule: { type: 'yearly', month: 7, day: 31 },
     variants: [
       {

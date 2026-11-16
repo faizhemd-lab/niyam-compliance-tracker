@@ -7,6 +7,7 @@ import { matchCAs } from '../shared/matching'
 import { runReminderJob } from '../shared/reminders'
 import { evaluateRules, missingFields, profileLine } from '../shared/rules'
 import { buildCalendar, summarise } from '../shared/schedule'
+import { createShareToken } from '../shared/sharing'
 import type { Company, Deadline, Profile, ReminderEntry, SharePermission } from '../shared/types'
 import { applyMapping, parseCsv, proposeMapping } from '../shared/validation'
 import { createZip } from '../shared/zip'
@@ -188,10 +189,7 @@ app.post('/api/share', async (c) => {
   if (!body) return badJson()
   const permission: SharePermission = body.permission === 'mark_done' ? 'mark_done' : 'view'
   const scope = Array.isArray(body.scope) && body.scope.length ? (body.scope as never[]) : 'all'
-  const bytes = crypto.getRandomValues(new Uint8Array(16))
-  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))
-  const token_hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+  const { token, token_hash } = await createShareToken()
   return c.json({ token, token_hash, permission, scope, expires_at: typeof body.expires_at === 'string' ? body.expires_at : null }, 201)
 })
 

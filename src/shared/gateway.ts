@@ -24,7 +24,8 @@ export type Extraction = { updates: Partial<Profile>; rejected: Rejection[]; not
 const PAN = /\b[A-Z]{5}[0-9]{4}[A-Z]\b/g
 const GSTIN = /\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]{3}\b/g
 const EMAIL = /\b[\w.+-]+@[\w-]+\.[\w.]+\b/g
-const PHONE = /\b(?:\+91[-\s]?)?[6-9]\d{9}\b/g
+// "\b" cannot sit before "+", so the country code is its own alternative.
+const PHONE = /(?:\+91[-\s]?|\b)[6-9]\d{9}\b/g
 
 /** Mask identifiers before anything reaches a model or a log. */
 export function maskIdentifiers(input: string): string {
@@ -147,8 +148,9 @@ export function extract(message: string, awaiting: ProfileField | null): Extract
   }
 
   // Employees
-  if (/just me|only me|solo|founder only|no employees|nobody else/.test(lower)) updates.employees = /no employees/.test(lower) ? 0 : 1
-  else if (/me and (a|one) (part[- ]?timer|partner|co-?founder)|two of us|both of us/.test(lower)) updates.employees = 2
+  // "Just me and a part-timer" is two people, so the pair check runs first.
+  if (/me and (a|one) (part[- ]?timer|partner|co-?founder)|two of us|both of us/.test(lower)) updates.employees = 2
+  else if (/just me|only me|solo|founder only|no employees|nobody else/.test(lower)) updates.employees = /no employees/.test(lower) ? 0 : 1
   else if (/\b(people|employees|staff|persons|team|headcount|on payroll)\b/.test(lower) || awaiting === 'employees') {
     // Read the number attached to the headcount word, so "60 lakh, 12 people" is 12.
     const adjacent = lower.match(/(\d{1,6})\s*(?:people|persons|employees|staff|team|headcount|payroll)/)

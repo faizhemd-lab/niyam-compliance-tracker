@@ -6,6 +6,7 @@ import { newId, useTracker } from '../lib/tracker'
 import { postJson } from '../lib/api'
 import { GROUP_LABELS } from '../shared/catalogue'
 import { addDays, formatDate, formatDateTime } from '../shared/format'
+import { shareAccess } from '../shared/sharing'
 import type { ObligationGroup, ShareLink, SharePermission } from '../shared/types'
 import { Header, PageHead, Shell } from '../components/AppShell'
 import { Badge, Chip, EmptyState } from '../components/Bits'
@@ -185,8 +186,9 @@ export function SharePage() {
           ) : (
             <ul className="mt-4 grid gap-2">
               {state.shares.map((link) => {
-                const expired = link.expires_at ? link.expires_at < state.today : false
-                const revoked = Boolean(link.revoked_at)
+                const access = shareAccess(link, state.today)
+                const expired = access.state === 'expired'
+                const revoked = access.state === 'revoked'
                 return (
                   <li key={link.id} className="rounded-[var(--radius-control)] border border-line px-4 py-3">
                     <div className="flex flex-wrap items-start justify-between gap-2">

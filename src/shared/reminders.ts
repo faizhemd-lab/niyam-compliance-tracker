@@ -32,7 +32,9 @@ export function reminderMessage(deadline: Deadline, stage: string, company: Comp
     `If it is late: ${deadline.penalty}${deadline.penalty_example ? ` (${deadline.penalty_example})` : ''}`,
   ]
   if (overdue) {
-    const late = Math.abs(Math.round((Date.parse(`${deadline.due_date}T00:00:00Z`) - Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)) / 86_400_000))
+    // The stage carries the (possibly simulated) day it was sent: "overdue-2026-11-16".
+    const sentOn = stage.slice('overdue-'.length)
+    const late = Math.abs(Math.round((Date.parse(`${deadline.due_date}T00:00:00Z`) - Date.parse(`${sentOn}T00:00:00Z`)) / 86_400_000))
     lines.push(`${plural(late, 'day')} overdue. Reminders continue daily until this is marked done.`)
     lines.push('What to file first: ' + deadline.how_to_file)
   } else {

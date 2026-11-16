@@ -7,6 +7,7 @@ import { useTracker } from '../lib/tracker'
 import { GROUP_LABELS } from '../shared/catalogue'
 import { checklistFor, checklistProgress } from '../shared/documents'
 import { formatDate } from '../shared/format'
+import { shareAccess, visibleDeadlines } from '../shared/sharing'
 import { downloadZip } from '../shared/zip'
 import { Header, PageHead, Shell } from '../components/AppShell'
 import { Badge, EmptyState } from '../components/Bits'
@@ -45,9 +46,9 @@ export function ShareView() {
     )
   }
 
-  const expired = share.expires_at ? share.expires_at < state.today : false
-  const inactive = Boolean(share.revoked_at) || expired
-  const visible = share.scope === 'all' ? deadlines : deadlines.filter((d) => share.scope.includes(d.group))
+  const access = shareAccess(share, state.today)
+  const inactive = !access.active
+  const visible = visibleDeadlines(share, deadlines, state.today)
   const scopedSummary = {
     ...summary,
     total: visible.length,
@@ -132,7 +133,7 @@ export function ShareView() {
                     </div>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    {share.permission === 'mark_done' && d.status !== 'done' ? (
+                    {access.canMarkDone && d.status !== 'done' ? (
                       <Button
                         variant="outline"
                         size="sm"
