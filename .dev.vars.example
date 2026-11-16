@@ -18,8 +18,8 @@ MODEL_NAME=qwen2.5:3b
 ENVIRONMENT=development
 APP_ORIGIN=http://localhost:5305
 
-# Clerk session-token verification (server side). Copy the public key from the
-# Clerk dashboard, or point at the instance JWKS. Without either of these the
-# deployed app refuses protected routes instead of letting anyone in.
-# CLERK_JWT_KEY="-----BEGIN PUBLIC KEY-----..."
-# CLERK_JWKS_URL=https://your-instance.clerk.accounts.dev/.well-known/jwks.json
+# Clerk session-token verification. The publishable key is public, and the
+# Worker derives the instance JWKS from it (CLERK_JWKS_URL overrides that, and
+# CLERK_JWT_KEY verifies against a PEM with no network call). Without one of
+# these the deployed app refuses protected routes instead of letting anyone in.
+# CLERK_PUBLISHABLE_KEY=pk_test_...

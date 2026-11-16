@@ -284,8 +284,8 @@ server-side two exist:
 | Where | Name | What it is |
 | --- | --- | --- |
 | build | `VITE_CLERK_PUBLISHABLE_KEY` | Clerk publishable key (`pk_test_…` / `pk_live_…`) |
-| Worker secret | `CLERK_JWT_KEY` | PEM public key from the Clerk dashboard (preferred: no network call per request) |
-| Worker secret | `CLERK_JWKS_URL` | alternative to the above: `https://<frontend-api>/.well-known/jwks.json` |
+| Worker var | `CLERK_PUBLISHABLE_KEY` | the same public key; the Worker derives the instance JWKS from it |
+| Worker secret | `CLERK_JWT_KEY` | optional: verify against a PEM, with no network call per request |
 | Worker var | `APP_ORIGIN` | the deployed origin, checked against the token's `azp` |
 
 `CLERK_SECRET_KEY` is not needed: session tokens are verified against the public

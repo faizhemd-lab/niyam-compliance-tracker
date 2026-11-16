@@ -12,8 +12,10 @@ export type AuthUser = { id: string; email: string | null }
 export type AuthEnv = {
   /** PEM public key copied from the Clerk dashboard, so no network call is needed. */
   CLERK_JWT_KEY?: string
-  /** https://<your-frontend-api>/.well-known/jwks.json */
+  /** The instance JWKS. Derived from CLERK_PUBLISHABLE_KEY when this is not set. */
   CLERK_JWKS_URL?: string
+  /** Public key (pk_test_… / pk_live_…): the same value the browser gets, never a secret. */
+  CLERK_PUBLISHABLE_KEY?: string
   /** The origin this app is served from; used to check the token's azp claim. */
   APP_ORIGIN?: string
   /** Only local `wrangler dev` sets `development`, which allows one local user. */
@@ -27,7 +29,7 @@ const DEV_USER: AuthUser = { id: 'local-development-user', email: 'developer@loc
 
 const encoder = new TextEncoder()
 
-export const clerkConfigured = (env: AuthEnv) => Boolean(env.CLERK_JWT_KEY || env.CLERK_JWKS_URL)
+export const clerkConfigured = (env: AuthEnv) => Boolean(env.CLERK_JWT_KEY || env.CLERK_JWKS_URL || env.CLERK_PUBLISHABLE_KEY)
 
 function bytesFromBase64(value: string): Uint8Array {
   const normalised = value.replace(/-/g, '+').replace(/_/g, '/')
@@ -78,10 +80,27 @@ async function keyFromJwks(url: string, kid?: string): Promise<CryptoKey | null>
   return crypto.subtle.importKey('jwk', jwk, { name: ALGORITHM, hash: HASH }, false, ['verify'])
 }
 
+/**
+ * A publishable key decodes to `<frontend-api>$`: that host serves the JWKS, so
+ * the server needs no secret and no second configuration value.
+ */
+function jwksUrl(env: AuthEnv): string | null {
+  if (env.CLERK_JWKS_URL) return env.CLERK_JWKS_URL
+  const key = env.CLERK_PUBLISHABLE_KEY?.trim()
+  if (!key) return null
+  try {
+    const payload = key.replace(/^pk_(test|live)_/, '')
+    const host = new TextDecoder().decode(bytesFromBase64(payload)).replace(/\$.*$/, '').trim()
+    return host ? `https://${host}/.well-known/jwks.json` : null
+  } catch {
+    return null
+  }
+}
+
 async function publicKey(env: AuthEnv, kid?: string): Promise<CryptoKey | null> {
   if (env.CLERK_JWT_KEY) return keyFromPem(env.CLERK_JWT_KEY)
-  if (env.CLERK_JWKS_URL) return keyFromJwks(env.CLERK_JWKS_URL, kid)
-  return null
+  const url = jwksUrl(env)
+  return url ? keyFromJwks(url, kid) : null
 }
 
 function authorisedParties(env: AuthEnv): string[] {

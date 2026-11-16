@@ -29,6 +29,7 @@ type Env = {
   /** The per-client record. See src/worker/db.ts. */
   DB?: D1Database
   /** Clerk session-token verification. See src/worker/auth.ts. */
+  CLERK_PUBLISHABLE_KEY?: string
   CLERK_JWT_KEY?: string
   CLERK_JWKS_URL?: string
   APP_ORIGIN?: string
