@@ -216,8 +216,8 @@ win32-x64` — the CLI resolves `@clerk/cli-win32-x64`, and npx never installs i
 Install that package into `.tools/` (gitignored) and call the binary directly:
 
 ```sh
-# one-time install of the Windows binary
-npm i --no-save --prefix .tools/clerk-cli @clerk/cli-win32-x64
+# one-time install of the Windows binary (pinned to the working version)
+npm i --no-save --prefix .tools/clerk-cli @clerk/cli-win32-x64@4.1.0
 chmod +x .tools/clerk-cli/node_modules/@clerk/cli-win32-x64/bin/clerk.exe
 
 CLERK=.tools/clerk-cli/node_modules/@clerk/cli-win32-x64/bin/clerk.exe
