@@ -162,7 +162,13 @@ needs Node’s fetch and does not work under Bun’s runtime.
 - `import-and-documents.test.ts`: messy CSVs, masked identifiers, DRAFT marks,
   folder names, manifests and checklist states.
 - `sharing.test.ts`: token size and hashing, expiry, revocation, view-only and
-  scope limits, and `POST /api/share`.
+  scope limits, and the share routes refusing without sign-in or a record store.
+- `agent.test.ts`: the agent loop with a scripted fake model (tool use, grounded
+  replies, fallbacks when the model is missing, down or fails, step and call
+  limits, duplicate calls, unknown tools, logging), the guardrails under any
+  model (`mark_done`, approval-only sharing, fact validation, no identifier ever
+  sent), and the OpenAI-compatible engine against a stubbed server.
+- `quota.test.ts`: the per-user message limits.
 
 If a rule changes on purpose, update its golden profile in the same commit.
 
@@ -176,6 +182,18 @@ If a rule changes on purpose, update its golden profile in the same commit.
   a reason. The model has no tool that can add or move a deadline.
 - Explanations are checked: every number in an answer must appear in the rule
   record, or the stored plain-words text is shown instead.
+- **Model replies are grounded** (`src/shared/grounding.ts`): every number, date
+  or ₹ amount in a model's reply must appear in that turn's tool results, the
+  record or the conversation. Otherwise the founder sees a code-written summary
+  of what the tools did (or the deterministic brain's answer), never the
+  unchecked wording.
+- **Hard limits per turn** (`LIMITS` in `agent.ts`): 6 model steps, 6 tool calls
+  per step, 16 per turn; the same call twice in one turn runs once.
+- **Per-user message limits** (`takeAgentQuota` in `src/worker/db.ts`): 30 agent
+  messages per 10 minutes and 300 per day, counted in D1; the API answers 429
+  with `retry-after`.
+- Every turn logs one masked, content-free line (`agent_turn`: engine, model,
+  time, tools, fallback reason) to Workers observability.
 - Every screen carries “guidance, not legal advice”, and rules without a
   reviewer sign-off show a “not yet verified” badge.
 - The activity log records profile changes, shares, downloads and CA actions.

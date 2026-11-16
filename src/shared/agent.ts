@@ -2,7 +2,9 @@ import { deadlinesFor, runAutopilot } from './autopilot'
 import { DOC_LABELS } from './catalogue'
 import { checklistFor, compileDeadline } from './documents'
 import { addDays, formatDate, plural } from './format'
+import { BRAIN_STATUS, engineFor, engineStatus, type Engine, type ModelEnv, type ModelStatus, type ToolSpec, type Turn } from './engines'
 import { explain, maskIdentifiers } from './gateway'
+import { checkGrounding } from './grounding'
 import {
   FIELDS,
   applyFacts,
@@ -56,16 +58,7 @@ import type { BudgetBand, Deadline, DocKey, Language, ObligationGroup, ShareLink
 
 export type { AgentAction, AgentCall, AgentChatMessage }
 
-export type ModelEnv = { MODEL_BASE_URL?: string; MODEL_NAME?: string; MODEL_API_KEY?: string }
-
-export type ModelStatus = {
-  configured: boolean
-  connected: boolean
-  engine: string
-  model?: string
-  models?: string[]
-  detail?: string
-}
+export type { ModelEnv, ModelStatus }
 
 export type AgentFactChange = { key: KnowledgeField; label: string; from?: string; to: string; source: FactSource }
 
@@ -82,6 +75,8 @@ export type AgentReply = {
   drafted?: { files: number; folders: number; missing: string[] }
   /** Actions waiting for the founder's approval that this turn added. */
   proposed: PendingAction[]
+  /** Set when the model's own reply was not used, and why. */
+  fallback?: 'no_engine' | 'engine_down' | 'engine_failed' | 'ungrounded' | 'out_of_steps'
 }
 
 export type AgentInput = {
@@ -105,32 +100,18 @@ type Ctx = {
   proposed: PendingAction[]
 }
 
-const MODEL_TIMEOUT = 25_000
-const MAX_MODEL_STEPS = 6
+/** Hard limits on one turn, whatever the model asks for. */
+export const LIMITS = {
+  /** Model calls per founder message. */
+  steps: 6,
+  /** Tool calls the model may make in one step; extra ones are refused. */
+  callsPerStep: 6,
+  /** Tool calls across the whole turn. */
+  callsPerTurn: 16,
+} as const
 
-export async function modelStatus(env: ModelEnv): Promise<ModelStatus> {
-  const baseUrl = env.MODEL_BASE_URL?.replace(/\/$/, '')
-  if (!baseUrl) {
-    return { configured: false, connected: false, engine: 'on-server deterministic brain' }
-  }
-  try {
-    const res = await fetch(`${baseUrl}/models`, {
-      headers: env.MODEL_API_KEY ? { authorization: `Bearer ${env.MODEL_API_KEY}` } : undefined,
-      signal: AbortSignal.timeout(2000),
-    })
-    if (!res.ok) return { configured: true, connected: false, engine: 'local model', model: env.MODEL_NAME, detail: `The model server answered ${res.status}.` }
-    const body = (await res.json()) as { data?: { id?: string }[] }
-    const models = (body.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id))
-    return { configured: true, connected: true, engine: 'self-hosted model', model: env.MODEL_NAME ?? models[0], models }
-  } catch (error) {
-    return {
-      configured: true,
-      connected: false,
-      engine: 'local model',
-      model: env.MODEL_NAME,
-      detail: error instanceof Error ? error.message.slice(0, 160) : 'The model server is unreachable.',
-    }
-  }
+export function modelStatus(env: ModelEnv): Promise<ModelStatus> {
+  return engineStatus(env)
 }
 
 // ---------------------------------------------------------------------------
@@ -633,10 +614,10 @@ How to work:
 - Reply in short sentences a first-time founder can follow. At most one question per reply. Guidance, not legal advice; you never file on a government portal.`
 
 const obj = (properties: Record<string, unknown> = {}, required: string[] = []) => ({ type: 'object', properties, ...(required.length ? { required } : {}) })
-const tool = (name: string, description: string, parameters = obj()) => ({ type: 'function', function: { name, description, parameters } })
+const tool = (name: string, description: string, parameters: Record<string, unknown> = obj()): ToolSpec => ({ name, description, parameters })
 const item = { item: { type: 'string', description: 'Deadline id from get_calendar (best), or the filing name, e.g. "AGM" or "GSTR-3B".' } }
 
-const TOOL_SPECS = [
+export const TOOL_SPECS: ToolSpec[] = [
   tool('read_company', 'Read every fact on the company record, with where it came from, and which required facts are missing.'),
   tool(
     'update_company',
@@ -682,55 +663,6 @@ const TOOL_SPECS = [
   tool('set_autopilot', 'Switch the daily 09:00 IST autopilot on or off.', obj({ enabled: { type: 'boolean' } }, ['enabled'])),
   tool('run_autopilot', 'Run the morning check now: reminders, drafts for anything due soon, and a summary.'),
 ]
-
-type ChatMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string; tool_call_id?: string; tool_calls?: unknown }
-type ModelResult = { content: string; tool_calls: { id: string; name: string; args: Record<string, unknown> }[] }
-
-async function callModel(env: ModelEnv, messages: ChatMessage[]): Promise<ModelResult | null> {
-  const baseUrl = env.MODEL_BASE_URL?.replace(/\/$/, '')
-  if (!baseUrl) return null
-  try {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(env.MODEL_API_KEY ? { authorization: `Bearer ${env.MODEL_API_KEY}` } : {}),
-      },
-      body: JSON.stringify({
-        model: env.MODEL_NAME ?? 'local-model',
-        messages,
-        tools: TOOL_SPECS,
-        tool_choice: 'auto',
-        temperature: 0.2,
-        max_tokens: 800,
-      }),
-      signal: AbortSignal.timeout(MODEL_TIMEOUT),
-    })
-    if (!res.ok) return null
-    const body = (await res.json()) as {
-      choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string | Record<string, unknown> } }[] } }[]
-    }
-    const message = body.choices?.[0]?.message
-    if (!message) return null
-    const calls = (message.tool_calls ?? []).map((c, index) => {
-      const raw = c.function?.arguments
-      let args: Record<string, unknown> = {}
-      if (raw && typeof raw === 'object') args = raw
-      else if (typeof raw === 'string') {
-        try {
-          const parsed = JSON.parse(raw) as unknown
-          if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>
-        } catch {
-          /* malformed arguments: the tool reports what it needs */
-        }
-      }
-      return { id: c.id ?? `call-${index}`, name: c.function?.name ?? '', args }
-    })
-    return { content: message.content ?? '', tool_calls: calls }
-  } catch {
-    return null
-  }
-}
 
 function situation(ctx: Ctx): string {
   const all = deadlines(ctx)
@@ -787,8 +719,6 @@ function finish(ctx: Ctx, reply: string, model: ModelStatus, engineLabel: string
   }
 }
 
-const BRAIN_STATUS: ModelStatus = { configured: false, connected: false, engine: 'on-server deterministic brain' }
-
 /** The deterministic engine; also runs in the browser when the Worker is unreachable. */
 export function localBrain(input: AgentInput, engineLabel = BRAIN_STATUS.engine): AgentReply {
   const founderAt = new Date().toISOString()
@@ -797,52 +727,110 @@ export function localBrain(input: AgentInput, engineLabel = BRAIN_STATUS.engine)
   return finish(ctx, reply, BRAIN_STATUS, engineLabel, founderAt)
 }
 
-/** The agent loop: up to six model steps, every tool call validated. */
-export async function runAgent(input: AgentInput, env: ModelEnv): Promise<AgentReply> {
-  const status = await modelStatus(env)
-  if (!status.configured || !status.connected) return localBrain(input)
+/** Masked, content-free log line per turn: which engine, how long, which tools, why it fell back. */
+function logTurn(entry: Record<string, unknown>) {
+  console.log(JSON.stringify({ event: 'agent_turn', ...entry }))
+}
+
+/**
+ * The agent loop: a model chooses tools for up to LIMITS.steps steps; every
+ * tool call is validated by the tool itself, and the final reply must be
+ * grounded in what the tools returned. Any failure lands on the deterministic
+ * brain or on a code-written summary, never on an unchecked answer.
+ */
+export async function runAgent(input: AgentInput, env: ModelEnv, engine: Engine | null = engineFor(env)): Promise<AgentReply> {
+  const started = Date.now()
+  if (!engine) {
+    const reply = { ...localBrain(input), fallback: 'no_engine' as const }
+    logTurn({ engine: 'brain', ms: Date.now() - started, fallback: reply.fallback, tools: reply.calls.map((c) => c.name) })
+    return reply
+  }
+  const status = await engine.status()
+  if (!status.connected) {
+    const reply = { ...localBrain(input), model: status, fallback: 'engine_down' as const }
+    logTurn({ engine: engine.id, ms: Date.now() - started, fallback: reply.fallback, tools: reply.calls.map((c) => c.name) })
+    return reply
+  }
 
   const founderAt = new Date().toISOString()
   const ctx = newCtx(input)
-  const history = input.record.agentMessages
+  const history: Turn[] = input.record.agentMessages
     .filter((m) => m.id !== 'greeting')
     .slice(-10)
-    .map((m) => ({ role: m.role === 'founder' ? ('user' as const) : ('assistant' as const), content: maskIdentifiers(m.text) }))
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'system', content: `${situation(ctx)}\n\nCompany record:\n${maskIdentifiers(knowledgeForPrompt(ctx.record.knowledge))}` },
-    ...history,
-    // The prompt only ever sees masked identifiers.
-    { role: 'user', content: maskIdentifiers(ctx.message) },
-  ]
+    .map((m) => (m.role === 'founder' ? { role: 'user' as const, text: maskIdentifiers(m.text) } : { role: 'assistant' as const, text: maskIdentifiers(m.text) }))
+  const context = `${situation(ctx)}\n\nCompany record:\n${maskIdentifiers(knowledgeForPrompt(ctx.record.knowledge))}`
+  // The model only ever sees masked identifiers: in the message, the record, the history and every tool result.
+  const turns: Turn[] = [...history, { role: 'user', text: maskIdentifiers(ctx.message) }]
+  const sources: string[] = [context, ...turns.map((t) => (t.role === 'tool' ? t.output : t.text))]
+  const seen = new Map<string, string>()
 
   let reply = ''
-  for (let step = 0; step < MAX_MODEL_STEPS; step++) {
-    const result = await callModel(env, messages)
-    if (!result) break
-    if (!result.tool_calls.length) {
-      reply = result.content.trim()
+  let steps = 0
+  let failed = false
+  let totalCalls = 0
+  for (; steps < LIMITS.steps; steps++) {
+    const result = await engine.step({ system: [SYSTEM_PROMPT, context], turns, tools: TOOL_SPECS })
+    if (!result) {
+      failed = true
       break
     }
-    messages.push({
-      role: 'assistant',
-      content: result.content ?? '',
-      tool_calls: result.tool_calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })),
-    })
-    for (const c of result.tool_calls) {
-      const output = executeTool(ctx, c.name, c.args)
-      messages.push({ role: 'tool', tool_call_id: c.id, content: maskIdentifiers(output) })
+    if (!result.toolCalls.length) {
+      reply = result.text.trim()
+      break
     }
+    turns.push({ role: 'assistant', text: result.text ?? '', toolCalls: result.toolCalls })
+    result.toolCalls.forEach((c, index) => {
+      let output: string
+      if (index >= LIMITS.callsPerStep || totalCalls >= LIMITS.callsPerTurn) {
+        output = 'Skipped: too many tool calls. Use fewer, and answer with what you already have.'
+      } else {
+        // The same call twice in one turn runs once: no double drafts, no repeated writes.
+        const key = `${c.name}:${JSON.stringify(c.args)}`
+        const previous = seen.get(key)
+        if (previous !== undefined) output = `Already done this turn. Result: ${previous}`
+        else {
+          totalCalls++
+          output = maskIdentifiers(executeTool(ctx, c.name, c.args))
+          seen.set(key, output)
+        }
+      }
+      turns.push({ role: 'tool', callId: c.id, name: c.name, output })
+      sources.push(output)
+    })
   }
 
-  const label = status.model ?? 'local model'
-  if (reply) return finish(ctx, reply, status, label, founderAt)
+  const label = status.model ?? 'model'
+  const toolNames = ctx.calls.map((c) => c.name)
+  const finishWith = (text: string, engineLabel: string, fallback?: AgentReply['fallback'], unsupported: string[] = []) => {
+    logTurn({ engine: engine.id, model: status.model, ms: Date.now() - started, steps: steps + (reply ? 1 : 0), tools: toolNames, tool_errors: ctx.calls.filter((c) => !c.ok).length, fallback, unsupported: unsupported.length })
+    return { ...finish(ctx, text, status, engineLabel, founderAt), ...(fallback ? { fallback } : {}) }
+  }
+  // Tool summaries are written by code from the tool results, so they are safe to show as-is.
+  const summary = () => {
+    const done = ctx.calls.filter((c) => c.ok).map((c) => c.summary)
+    const refused = ctx.calls.filter((c) => !c.ok).map((c) => c.summary)
+    return [done.length && `Done: ${done.join('; ')}.`, refused.length && `Not done: ${refused.join('; ')}.`].filter(Boolean).join(' ')
+  }
 
-  // The model ran out of steps or failed mid-loop. Keep whatever its tools did;
+  if (reply) {
+    const check = checkGrounding(reply, sources)
+    if (check.grounded) return finishWith(reply, label)
+    // An unsupported number: show what the tools did instead of the model's wording.
+    if (ctx.calls.length) return finishWith(summary(), `${label} (checked)`, 'ungrounded', check.unsupported)
+    const brain = localBrain(input)
+    logTurn({ engine: engine.id, model: status.model, ms: Date.now() - started, steps: steps + 1, tools: [], fallback: 'ungrounded', unsupported: check.unsupported.length })
+    return { ...brain, model: status, fallback: 'ungrounded' }
+  }
+
+  // The model failed or ran out of steps. Keep whatever its tools did;
   // if it did nothing, let the deterministic brain take the whole turn.
-  if (!ctx.calls.length) return { ...localBrain(input), model: status }
-  const done = ctx.calls.filter((c) => c.ok).map((c) => c.summary)
-  return finish(ctx, done.length ? `Done: ${done.join('; ')}.` : 'I could not finish that. Try asking in a shorter way.', status, `${label} (summarised)`, founderAt)
+  const fallback = failed ? ('engine_failed' as const) : ('out_of_steps' as const)
+  if (!ctx.calls.length) {
+    const brain = localBrain(input)
+    logTurn({ engine: engine.id, model: status.model, ms: Date.now() - started, steps, tools: [], fallback })
+    return { ...brain, model: status, fallback }
+  }
+  return finishWith(summary() || 'I could not finish that. Try asking in a shorter way.', `${label} (summarised)`, fallback)
 }
 
 // ---------------------------------------------------------------------------

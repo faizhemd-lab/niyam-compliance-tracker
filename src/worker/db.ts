@@ -26,6 +26,14 @@ export function ensureSchema(db: D1Database): Promise<void> {
            )`,
         ),
         db.prepare('CREATE INDEX IF NOT EXISTS shares_by_user ON shares (user_id)'),
+        db.prepare(
+          `CREATE TABLE IF NOT EXISTS agent_usage (
+             user_id TEXT NOT NULL,
+             bucket TEXT NOT NULL,
+             count INTEGER NOT NULL,
+             PRIMARY KEY (user_id, bucket)
+           )`,
+        ),
       ])
       .then(() => undefined)
       .catch((error) => {
@@ -97,4 +105,45 @@ export async function shareOwner(db: D1Database, tokenHash: string): Promise<str
 export async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Per-user limits on agent messages, counted in D1 so they hold across every
+ * Worker instance. Each message counts against a 10-minute and a daily bucket.
+ */
+export const AGENT_QUOTA = { perTenMinutes: 30, perDay: 300 } as const
+
+export type QuotaResult = { ok: true } | { ok: false; retryAfter: number; window: 'ten_minutes' | 'day' }
+
+export async function takeAgentQuota(db: D1Database, userId: string, now = new Date()): Promise<QuotaResult> {
+  const iso = now.toISOString()
+  const day = iso.slice(0, 10)
+  const tenMinutes = `${iso.slice(0, 15)}0`
+  const bump = (bucket: string) =>
+    db
+      .prepare(
+        `INSERT INTO agent_usage (user_id, bucket, count) VALUES (?1, ?2, 1)
+         ON CONFLICT (user_id, bucket) DO UPDATE SET count = count + 1
+         RETURNING count`,
+      )
+      .bind(userId, bucket)
+  const [short, long] = await db.batch<{ count: number }>([bump(`m:${tenMinutes}`), bump(`d:${day}`)])
+  const shortCount = short.results?.[0]?.count ?? 0
+  const longCount = long.results?.[0]?.count ?? 0
+
+  // Old buckets are swept now and then rather than on every message.
+  if (Math.random() < 0.02) {
+    const cutoff = new Date(now.getTime() - 2 * 86_400_000).toISOString().slice(0, 10)
+    await db.prepare(`DELETE FROM agent_usage WHERE substr(bucket, 3, 10) < ?1`).bind(cutoff).run()
+  }
+
+  if (longCount > AGENT_QUOTA.perDay) {
+    const tomorrow = Date.parse(`${day}T00:00:00Z`) + 86_400_000
+    return { ok: false, window: 'day', retryAfter: Math.max(1, Math.ceil((tomorrow - now.getTime()) / 1000)) }
+  }
+  if (shortCount > AGENT_QUOTA.perTenMinutes) {
+    const next = Date.parse(`${tenMinutes}:00.000Z`) + 600_000
+    return { ok: false, window: 'ten_minutes', retryAfter: Math.max(1, Math.ceil((next - now.getTime()) / 1000)) }
+  }
+  return { ok: true }
 }

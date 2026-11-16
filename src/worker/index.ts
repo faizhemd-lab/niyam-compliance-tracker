@@ -17,7 +17,7 @@ import type { Company, Deadline, DocKey, Profile, ReminderEntry, ShareLink, Shar
 import { applyMapping, parseCsv, proposeMapping } from '../shared/validation'
 import { createZip } from '../shared/zip'
 import { authenticatedUser } from './auth'
-import { ensureSchema, listRecords, readRecord, sha256Hex, shareOwner, syncShares, writeRecord, writeRecordIf } from './db'
+import { ensureSchema, listRecords, readRecord, sha256Hex, shareOwner, syncShares, takeAgentQuota, writeRecord, writeRecordIf } from './db'
 
 /**
  * The Worker behind the app. It holds the rules engine, the calendar service,
@@ -235,6 +235,11 @@ app.post('/api/agent/message', async (c) => {
   // masking happens again at the model boundary inside runAgent.
   const message = typeof body.message === 'string' ? body.message.slice(0, 4000).trim() : ''
   if (!message) return c.json({ error: 'Say something for the agent to work with.' }, 422, NO_STORE)
+  const quota = await takeAgentQuota(context.db, context.userId)
+  if (!quota.ok) {
+    const error = quota.window === 'day' ? 'You have reached today’s limit of agent messages. It resets at midnight UTC.' : 'That is a lot of messages in a few minutes. Wait a moment and send it again.'
+    return c.json({ error, code: 'rate_limited', retry_after: quota.retryAfter }, 429, { ...NO_STORE, 'retry-after': String(quota.retryAfter) })
+  }
   const reply = await runAgent(
     {
       record: context.record,

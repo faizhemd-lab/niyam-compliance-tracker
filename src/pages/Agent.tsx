@@ -72,7 +72,8 @@ export function Agent() {
       adopt(res.data.record, res.data.saved_at)
       setModel(res.data.model)
       announce(res.data)
-    } else if (res.status === 409 || res.status === 401 || res.status === 403) {
+    } else if (res.status === 409 || res.status === 401 || res.status === 403 || res.status === 422 || res.status === 429) {
+      // A refusal from the server (conflict, sign-in, message limit) is shown as-is; the browser does not answer instead.
       toast(res.error)
       setInput(text)
     } else {
