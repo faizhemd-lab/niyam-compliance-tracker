@@ -1,0 +1,80 @@
+# Test, build and deploy to Cloudflare Workers on every push to main.
+#
+# Needs one repository secret: CLOUDFLARE_API_TOKEN (see "Deploy" in the README).
+# Without it the workflow still runs the tests and the build, then skips the
+# deploy with a notice instead of failing.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time; a newer push waits for the running one instead of racing it.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Not secret: the account that owns niyam-compliance-tracker.workers.dev.
+      CLOUDFLARE_ACCOUNT_ID: 8fa5a4ce9840184d1de645f309d8d6ca
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # --legacy-peer-deps: npm's resolver crashes on Vitest's optional peers.
+      # There is no package-lock.json in the repo (bun.lock is the lockfile).
+      - name: Install dependencies
+        run: npm install --no-package-lock --no-audit --no-fund --legacy-peer-deps
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # The Clerk publishable key is public; it lives in wrangler.jsonc and is
+      # baked into the SPA at build time.
+      - name: Build
+        run: |
+          VITE_CLERK_PUBLISHABLE_KEY=$(grep -o '"CLERK_PUBLISHABLE_KEY": "[^"]*"' wrangler.jsonc | sed 's/.*: "//; s/"$//')
+          test -n "$VITE_CLERK_PUBLISHABLE_KEY"
+          export VITE_CLERK_PUBLISHABLE_KEY
+          node node_modules/vite/bin/vite.js build
+          rm -f dist/niyam/.dev.vars
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set, so the deploy was skipped. Tests and build passed."
+            exit 0
+          fi
+          npx wrangler deploy
+
+      - name: Check the live site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          [ -z "$CLOUDFLARE_API_TOKEN" ] && exit 0
+          bundle=$(ls dist/client/assets/index-*.js | head -1 | xargs basename)
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS https://niyam.niyam-compliance-tracker.workers.dev/ | grep -q "$bundle"; then
+              echo "Live site serves $bundle"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The live site is not serving $bundle after the deploy."
+          exit 1

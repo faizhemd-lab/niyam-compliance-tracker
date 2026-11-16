@@ -370,7 +370,20 @@ API, the record lives in D1, and the autopilot runs from a Cron Trigger.
 `wrangler.jsonc` already names the D1 database (`niyam-records`), the public
 `CLERK_PUBLISHABLE_KEY`, `APP_ORIGIN` and the cron.
 
-To redeploy (Node 22+; the Cloudflare Vite plugin does not run under Bun):
+**Every push to `main` deploys automatically.** `.github/workflows/deploy.yml`
+installs, typechecks, runs the tests, builds and runs `wrangler deploy`, then
+checks the live site serves the new bundle. A failing test stops the deploy.
+It needs one repository secret, `CLOUDFLARE_API_TOKEN`:
+
+1. Cloudflare dashboard → My Profile → API Tokens → Create Token → the
+   **Edit Cloudflare Workers** template, limited to this account.
+2. GitHub → the repo → Settings → Secrets and variables → Actions → New
+   repository secret, named `CLOUDFLARE_API_TOKEN`.
+
+Without the secret the workflow still tests and builds, then skips the deploy
+with a notice. It can also be run by hand from the Actions tab.
+
+To deploy by hand instead (Node 22+; the Cloudflare Vite plugin does not run under Bun):
 
 ```sh
 npx wrangler login                 # once, in the browser
