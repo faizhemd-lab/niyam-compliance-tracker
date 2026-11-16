@@ -17,7 +17,8 @@ Impact Hub, Hyderabad, 14 November 2026.
 
 | Area | Route | What it does |
 | --- | --- | --- |
-| Landing | `/` | Promise, problem, the ten features, the seven-step journey, straight answers |
+| Landing | `/` | Public: promise, problem, the ten features, the seven-step journey, straight answers, sign-in |
+| Sign in | `/login` | Clerk sign-in; every other route below needs it |
 | Agent | `/agent` | Free-form chat that reads and writes the company record, answers what is due, drafts filings, and shows its tool calls |
 | Obligations | `/obligations` | Every rule that applies, with the reason written from your answers and the rule version |
 | Calendar | `/calendar` | Dated deadlines for 60 days back to 12 months ahead, colour coded, with an “on event” lane and .ics export |
@@ -169,14 +170,46 @@ filing cover sheet, the templates it can fill, a checklist and
 (`src/shared/zip.ts`) that runs in the Worker and in the browser. The compiler
 reports fields it is missing rather than producing a half-empty document.
 
+## Sign-in, and one record per client
+
+`/` (the landing page), `/login` and `/s/:token` (a CA's share link) are public.
+Everything else is behind `RequireAuth`, which sends a signed-out visitor to
+`/login` and returns them where they were headed.
+
+Sign-in is **Clerk** (`@clerk/react` in the browser, verified in the Worker).
+The Worker verifies the session JWT with Web Crypto only — RS256 against
+`CLERK_JWT_KEY`, or the instance JWKS when only `CLERK_JWKS_URL` is set — and
+checks `exp`, `nbf` and the `azp` claim against `APP_ORIGIN`. No Node built-ins,
+so it runs in workerd.
+
+Each client owns exactly one row in D1 (`src/worker/db.ts`): `records` holds the
+tracker state as JSON, scoped by the token's `sub`, never by an id the client
+sends. `shares` is only a token-hash → owner index, rebuilt from the record on
+every save, so a public share link resolves on any device without a session.
+
+The app fails closed. With no Clerk configuration the protected routes answer
+`503 auth_unconfigured`; the single exception is `ENVIRONMENT=development`,
+which allows one fixed local user so the app stays testable locally.
+
+Local development:
+
+```sh
+cp .dev.vars.example .dev.vars   # includes ENVIRONMENT=development
+bun run dev
+```
+
 ## API
 
-All routes are stateless pure functions of their payload; the founder’s record
-and statuses live in the browser (`localStorage`), so there is no session table
-in this build.
+Computational routes are stateless pure functions of their payload. The record
+and the share-link lookup need a session and the D1 store.
 
 ```
 GET  /api/health
+GET  /api/me                             the signed-in client, or 401
+GET  /api/record                         that client's record, or null
+PUT  /api/record                         { data }  same-origin only
+GET  /api/share/:token                   public: scoped deadlines + checklists
+POST /api/share/:token/done              public: needs mark-done permission
 GET  /api/agent/status                   which engine, which model, reachable?
 POST /api/agent/message                  { knowledge, message, history, today, statuses }
 POST /api/interview/message              { profile, message, awaiting }   (legacy extractor)
@@ -220,15 +253,19 @@ src/
 ## Data and limits of this build
 
 - **Storage:** the record, statuses, checklist ticks, generated files, share
-  links, reminder log and activity log live in `localStorage`. A share link
-  therefore resolves on the device that created it; a hosted deployment stores
-  the token hash server-side and resolves it anywhere.
+  links, reminder log and activity log live in D1, one row per signed-in client.
+  A local copy is kept in `localStorage` as an optimistic cache and is cleared on
+  sign-out. Share links resolve anywhere, because the token hash is indexed
+  server-side.
+- **No seeded data:** a new client starts with an empty company record. There is
+  no sample company, no demo CA directory (the matcher is built, the directory
+  is empty until real firms are onboarded), and no fabricated import row.
 - **Model:** optional. Without `MODEL_BASE_URL` the deterministic brain answers;
   that path is fully built, not a placeholder. Translation of explanations into
   Hindi is not implemented (the field exists and falls back to English).
-- **CA directory:** sample people, real scoring (specialty 40%, location and
-  language 20%, budget 15%, rating 15%, availability 10%). Payment never enters
-  the score.
+- **CA directory:** empty, with real scoring waiting for it (specialty 40%,
+  location and language 20%, budget 15%, rating 15%, availability 10%). Payment
+  never enters the score.
 - **Documents:** HTML and CSV drafts (print to PDF), not Word or PDF generation.
 - **State-specific rules** (professional tax, Shop licence) stay in the on-event
   lane until a state-specific rule is verified.
@@ -240,3 +277,21 @@ Freebuff Sites tool (or the Sites API) from this directory. A deployment cannot
 reach a model server running on your laptop: for the model path, self-host the
 Worker with the model on the same network, or leave it on the deterministic
 brain.
+
+Sign-in needs four values, and the app refuses protected routes until the
+server-side two exist:
+
+| Where | Name | What it is |
+| --- | --- | --- |
+| build | `VITE_CLERK_PUBLISHABLE_KEY` | Clerk publishable key (`pk_test_…` / `pk_live_…`) |
+| Worker secret | `CLERK_JWT_KEY` | PEM public key from the Clerk dashboard (preferred: no network call per request) |
+| Worker secret | `CLERK_JWKS_URL` | alternative to the above: `https://<frontend-api>/.well-known/jwks.json` |
+| Worker var | `APP_ORIGIN` | the deployed origin, checked against the token's `azp` |
+
+`CLERK_SECRET_KEY` is not needed: session tokens are verified against the public
+key, so no privileged Clerk credential is stored. D1 comes from
+`sites_add_storage` (`DB`, binding name `DB`); the schema creates itself on first
+use.
+
+The Vercel configuration (`vercel.json`) still builds the SPA for static hosting,
+but has no D1, so its `/api/record` cannot work: the hosted app belongs on Sites.

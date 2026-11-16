@@ -75,7 +75,7 @@ function ObligationCard({ obligation, deadlines }: { obligation: Obligation; dea
 
 export function Obligations() {
   useDocumentTitle('Obligations')
-  const { profile, obligations, deadlines, summary, needsIncorporation, loadDemo } = useTracker()
+  const { profile, obligations, deadlines, summary, needsIncorporation } = useTracker()
   const [group, setGroup] = useState<ObligationGroup | 'all'>('all')
   const [downloading, setDownloading] = useState(false)
 
@@ -107,7 +107,7 @@ export function Obligations() {
         <Card className="mt-2">
           <EmptyState
             title="No profile, no calendar"
-            body="Answer eight questions, or load the sample company to see a full calendar with 14 obligations."
+            body="Tell the agent about the business and the rules engine lists every obligation that applies to it."
             action={
               <div className="flex flex-wrap justify-center gap-2">
                 <ButtonLink to="/agent" variant="violet" iconRight={<ArrowRight className="size-4" />}>
@@ -116,9 +116,6 @@ export function Obligations() {
                 <ButtonLink to="/import" variant="outline">
                   Import a spreadsheet
                 </ButtonLink>
-                <Button variant="ghost" onClick={loadDemo}>
-                  Load the sample company
-                </Button>
               </div>
             }
           />

@@ -263,6 +263,10 @@ export function executeTool(ctx: Ctx, name: AgentToolName, args: Record<string, 
     }
     case 'find_ca': {
       const matches = matchCAs(company, deadlines, CAS, input.budget).slice(0, 3)
+      if (!matches.length) {
+        ctx.calls.push({ name: 'find_ca', summary: 'No firms in the directory', ok: true })
+        return 'The CA directory is not open yet, so there are no firms for me to match you with. You can still give your own CA a scoped share link from the Share page.'
+      }
       ctx.actions.push({ label: 'See all matched CAs', to: '/ca' })
       ctx.calls.push({ name: 'find_ca', summary: `Scored ${CAS.length} accountants`, ok: true })
       return matches.map((m) => `${m.ca.name} (${m.ca.city}, score ${m.score}): ${m.reasons[0]}`).join('\n')

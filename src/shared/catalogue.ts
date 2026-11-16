@@ -417,81 +417,8 @@ export const RULES: Rule[] = [
   },
 ]
 
-/** Sample CA directory. The scoring in matching.ts is real; the people are not. */
-export const CAS: CAProfile[] = [
-  {
-    id: 'ca-ananya',
-    name: 'Ananya Rao',
-    city: 'Hyderabad',
-    languages: ['Telugu', 'English', 'Hindi'],
-    specialties: ['company_law', 'income_tax', 'gst'],
-    fee_band: '30k_60k',
-    rating: 4.8,
-    reviews: 41,
-    accepting: true,
-    blurb: 'Private limited companies from incorporation to first audit.',
-  },
-  {
-    id: 'ca-vikram',
-    name: 'Vikram Shetty',
-    city: 'Bengaluru',
-    languages: ['Kannada', 'English'],
-    specialties: ['fema', 'company_law', 'income_tax'],
-    fee_band: 'above_60k',
-    rating: 4.9,
-    reviews: 63,
-    accepting: true,
-    blurb: 'Foreign-funded startups, FC-GPR and FEMA compounding.',
-  },
-  {
-    id: 'ca-meera',
-    name: 'Meera Iyer',
-    city: 'Chennai',
-    languages: ['Tamil', 'English'],
-    specialties: ['gst', 'payroll', 'income_tax'],
-    fee_band: '10k_30k',
-    rating: 4.6,
-    reviews: 28,
-    accepting: true,
-    blurb: 'GST and payroll for small teams, monthly retainer.',
-  },
-  {
-    id: 'ca-rahul',
-    name: 'Rahul Deshpande',
-    city: 'Pune',
-    languages: ['Marathi', 'Hindi', 'English'],
-    specialties: ['gst', 'company_law', 'labour'],
-    fee_band: '10k_30k',
-    rating: 4.4,
-    reviews: 19,
-    accepting: false,
-    blurb: 'Shops & Establishments, professional tax and GST across Maharashtra.',
-  },
-  {
-    id: 'ca-fatima',
-    name: 'Fatima Sheikh',
-    city: 'Hyderabad',
-    languages: ['Telugu', 'Urdu', 'English'],
-    specialties: ['income_tax', 'payroll', 'labour'],
-    fee_band: 'under_10k',
-    rating: 4.5,
-    reviews: 12,
-    accepting: true,
-    blurb: 'First-year filings for proprietorships and small LLPs.',
-  },
-  {
-    id: 'ca-arjun',
-    name: 'Arjun Menon',
-    city: 'Kochi',
-    languages: ['Malayalam', 'English'],
-    specialties: ['company_law', 'gst', 'payroll'],
-    fee_band: '30k_60k',
-    rating: 4.7,
-    reviews: 35,
-    accepting: true,
-    blurb: 'LLPs and private companies, audit and annual returns.',
-  },
-]
+/** The CA directory holds real firms only; it stays empty until onboarding. */
+export const CAS: CAProfile[] = []
 
 export const INDIAN_STATES = [
   'Andhra Pradesh',

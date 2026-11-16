@@ -40,7 +40,7 @@ function MonthBlock({ month, items }: { month: string; items: Deadline[] }) {
 
 export function CalendarPage() {
   useDocumentTitle('Calendar')
-  const { deadlines, summary, state, profile, company, loadDemo } = useTracker()
+  const { deadlines, summary, state, profile, company } = useTracker()
   const [downloading, setDownloading] = useState(false)
   const dated = deadlines.filter((d) => d.due_date)
   const events = deadlines.filter((d) => !d.due_date)
@@ -75,15 +75,12 @@ export function CalendarPage() {
         <Card className="mt-2">
           <EmptyState
             title="No calendar yet"
-            body="Answer the eight questions, or load the sample company to see a year of deadlines."
+            body="Tell the agent about the business and this page fills with every dated deadline for the next 12 months."
             action={
               <div className="flex flex-wrap justify-center gap-2">
                 <ButtonLink to="/agent" variant="violet">
                   Talk to the agent
                 </ButtonLink>
-                <Button variant="outline" onClick={loadDemo}>
-                  Load the sample company
-                </Button>
               </div>
             }
           />

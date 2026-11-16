@@ -1,4 +1,4 @@
-import type { BudgetBand, Company } from './shared/types'
+import type { BudgetBand } from './shared/types'
 
 export const SITE = {
   name: 'Niyam',
@@ -52,7 +52,7 @@ export const FEATURES = [
   { title: 'Document checklist per item', body: 'Have, Missing or Can be generated, rolled up onto the calendar entry.', status: 'Real' },
   { title: 'Agent-drafted documents', body: 'Ask in chat for any filing; it compiles the cover sheet, templates and checklist, and names the facts it still needs.', status: 'Real' },
   { title: 'Share with your CA', body: 'A random link, hashed at rest, with view or view-and-mark-done permission and an activity log.', status: 'Real (link)' },
-  { title: 'CA matching', body: 'Weighted scoring on specialty, location, budget, rating and availability, with reasons.', status: 'Mock directory' },
+  { title: 'CA matching', body: 'Weighted scoring on specialty, location, budget, rating and availability, with the reason for every match.', status: 'Directory not open' },
 ]
 
 export const TRUST = [
@@ -79,23 +79,6 @@ export const GLOSSARY: { term: string; meaning: string }[] = [
   { term: 'Model gateway', meaning: 'The one module through which the app talks to a language model. It can be pointed at a self-hosted model without touching any other code.' },
 ]
 
-export const DEMO_COMPANY: Company = {
-  name: 'Northwind Labs Private Limited',
-  entity: 'private_limited',
-  state: 'Telangana',
-  turnover: 6_000_000,
-  employees: 12,
-  sells: 'services',
-  gst_registered: false,
-  interstate: false,
-  foreign_investment: false,
-  incorporated_on: '2026-04-01',
-  pan_masked: 'AB••••34F',
-  directors: [{ name: 'Ananya Rao', din: '01234567', email: 'ananya@northwind.example' }],
-  budget: '10k_30k',
-  email: 'ananya@northwind.example',
-}
-
 export const BUDGET_OPTIONS: { value: BudgetBand; label: string }[] = [
   { value: 'under_10k', label: 'Under ₹10,000 a year' },
   { value: '10k_30k', label: '₹10,000–30,000 a year' },
@@ -103,10 +86,3 @@ export const BUDGET_OPTIONS: { value: BudgetBand; label: string }[] = [
   { value: 'above_60k', label: 'Above ₹60,000 a year' },
 ]
 
-export const DEMO_SCRIPT = [
-  'A founder finds out about a filing only when the notice arrives.',
-  'One line about the business, and the agent has a full compliance record.',
-  'Open any deadline: the authority, the penalty and the reason it exists.',
-  'Ask it to draft the filing; every folder comes marked DRAFT.',
-  'Move the clock. Watch a reminder fire, go overdue, then stop when marked done.',
-]

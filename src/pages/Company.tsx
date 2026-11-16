@@ -1,4 +1,4 @@
-import { ArrowUpRight, Bot, Check, Plus, RotateCcw, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowUpRight, Bot, Check, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -19,7 +19,7 @@ const SOURCE: Record<string, string> = { interview: 'said', agent: 'chat', impor
 
 export function CompanyPage() {
   useDocumentTitle('Company record')
-  const { knowledge, company, applyKnowledge, loadDemo, reset } = useTracker()
+  const { knowledge, company, applyKnowledge, reset } = useTracker()
   const toast = useToast()
   const [values, setValues] = useState<Record<string, string>>({})
   const [errors, setErrors] = useState<string[]>([])
@@ -147,9 +147,6 @@ export function CompanyPage() {
             <ButtonLink to="/agent" variant="ghost" size="sm" icon={<Bot className="size-4" />}>
               Change it by chat
             </ButtonLink>
-            <Button variant="ghost" size="sm" onClick={loadDemo} icon={<Sparkles className="size-4" />}>
-              Load sample
-            </Button>
             <Button
               variant="outline"
               size="sm"

@@ -1,4 +1,4 @@
-import { ArrowRight, Bot, Cpu, FileStack, Loader2, Send, Sparkles, Trash2, Wrench } from 'lucide-react'
+import { ArrowRight, Bot, Cpu, FileStack, Loader2, Send, Trash2, Wrench } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
@@ -26,7 +26,7 @@ const SOURCE_LABEL: Record<string, string> = {
 
 export function Agent() {
   useDocumentTitle('Your compliance agent')
-  const { state, knowledge, company, obligations, summary, setKnowledge, addAgentMessage, addGenerated, markDone, log, loadDemo, reset } = useTracker()
+  const { state, knowledge, company, obligations, summary, setKnowledge, addAgentMessage, addGenerated, markDone, log, reset } = useTracker()
   const toast = useToast()
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -120,9 +120,6 @@ export function Agent() {
             <Badge tone={model?.connected ? 'success' : 'neutral'}>
               {model?.connected ? `Local model: ${model.model ?? 'connected'}` : model?.configured ? 'Local model unreachable' : 'On-server brain'}
             </Badge>
-            <Button variant="outline" size="sm" icon={<Sparkles className="size-4" />} onClick={loadDemo}>
-              Sample company
-            </Button>
             <Button
               variant="ghost"
               size="sm"

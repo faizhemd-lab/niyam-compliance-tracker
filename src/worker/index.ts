@@ -1,17 +1,21 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 
 import { modelStatus, runAgent } from '../shared/agent'
 import { CAS, RULES, RULE_VERSION } from '../shared/catalogue'
-import { compileDeadline } from '../shared/documents'
+import { compileDeadline, checklistFor } from '../shared/documents'
 import { classify, explain, extract, GATEWAY, maskIdentifiers } from '../shared/gateway'
+import { deriveProfile, knowledgeToCompany } from '../shared/knowledge'
 import { matchCAs } from '../shared/matching'
 import { runReminderJob } from '../shared/reminders'
 import { evaluateRules, missingFields, profileLine } from '../shared/rules'
 import { buildCalendar, summarise } from '../shared/schedule'
 import type { AgentInput } from '../shared/agent'
-import type { Company, Deadline, Profile, ReminderEntry, SharePermission } from '../shared/types'
+import type { Company, Deadline, DocKey, Profile, ReminderEntry, ShareLink, SharePermission } from '../shared/types'
 import { applyMapping, parseCsv, proposeMapping } from '../shared/validation'
 import { createZip } from '../shared/zip'
+import { authenticatedUser } from './auth'
+import { ensureSchema, readRecord, sha256Hex, shareOwner, syncShares, writeRecord } from './db'
 
 /**
  * The Worker behind the app. It holds the rules engine, the calendar service,
@@ -22,13 +26,50 @@ import { createZip } from '../shared/zip'
 type Env = {
   /** Static assets binding; absent where a platform serves the assets itself. */
   ASSETS?: Fetcher
+  /** The per-client record. See src/worker/db.ts. */
+  DB?: D1Database
+  /** Clerk session-token verification. See src/worker/auth.ts. */
+  CLERK_JWT_KEY?: string
+  CLERK_JWKS_URL?: string
+  APP_ORIGIN?: string
+  ENVIRONMENT?: string
   /** Point these at a self-hosted Ollama, llama.cpp or vLLM server. */
   MODEL_BASE_URL?: string
   MODEL_NAME?: string
   MODEL_API_KEY?: string
 }
 
-const app = new Hono<{ Bindings: Env }>()
+type AppEnv = { Bindings: Env }
+
+const app = new Hono<AppEnv>()
+
+/** Personalized answers are never cached, by us or by a proxy. */
+const NO_STORE = { 'cache-control': 'private, no-store' } as const
+
+function unauthorised(c: Context<AppEnv>, reason: 'unconfigured' | 'unauthorized') {
+  return reason === 'unconfigured'
+    ? c.json({ error: 'Sign-in is not configured on this deployment yet.', code: 'auth_unconfigured' }, 503, NO_STORE)
+    : c.json({ error: 'Sign in to use this.', code: 'unauthorized' }, 401, NO_STORE)
+}
+
+/** The signed-in client, or the response that refuses the request. */
+async function authFor(c: Context<AppEnv>) {
+  const result = await authenticatedUser(c.req.raw, c.env)
+  return result.user ? { user: result.user, response: null } : { user: null, response: unauthorised(c, result.reason) }
+}
+
+/** Writes must come from this app's own origin. */
+function sameOrigin(request: Request, env: Env) {
+  const origin = request.headers.get('origin')
+  if (!origin) return true
+  const here = new URL(request.url).origin
+  if (origin.replace(/\/$/, '') === here) return true
+  const allowed = (env.APP_ORIGIN ?? '')
+    .split(',')
+    .map((value) => value.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+  return allowed.includes(origin.replace(/\/$/, ''))
+}
 
 const today = () => new Date().toISOString().slice(0, 10)
 
@@ -59,6 +100,53 @@ function validateProfile(profile: Profile) {
 }
 
 app.get('/api/health', (c) => c.json({ ok: true, rules: RULES.length, rule_version: RULE_VERSION, gateway: GATEWAY.engine }))
+
+// 0. Who is signed in, and the one company record they own.
+app.get('/api/me', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  return c.json({ user: auth.user }, 200, NO_STORE)
+})
+
+app.get('/api/record', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  if (!c.env.DB) return c.json({ error: 'The record store is not configured on this deployment.' }, 503, NO_STORE)
+  await ensureSchema(c.env.DB)
+  const row = await readRecord(c.env.DB, auth.user.id)
+  if (!row) return c.json({ data: null, saved_at: null }, 200, NO_STORE)
+  try {
+    return c.json({ data: JSON.parse(row.data), saved_at: row.updated_at }, 200, NO_STORE)
+  } catch {
+    return c.json({ error: 'The stored record could not be read.' }, 500, NO_STORE)
+  }
+})
+
+app.put('/api/record', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  if (!sameOrigin(c.req.raw, c.env)) return c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE)
+  if (!c.env.DB) return c.json({ error: 'The record store is not configured on this deployment.' }, 503, NO_STORE)
+  const text = await c.req.text()
+  if (text.length > 512_000) return c.json({ error: 'That record is too large to save.' }, 413, NO_STORE)
+  let body: Record<string, unknown>
+  try {
+    body = JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return badJson()
+  }
+  const data = body?.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return c.json({ error: 'Send the record as { data: {} }.' }, 422, NO_STORE)
+  await ensureSchema(c.env.DB)
+  const savedAt = await writeRecord(c.env.DB, auth.user.id, JSON.stringify(data))
+  const shares = Array.isArray((data as { shares?: unknown }).shares) ? ((data as { shares: { token_hash?: unknown }[] }).shares ?? []) : []
+  await syncShares(
+    c.env.DB,
+    auth.user.id,
+    shares.map((share) => (typeof share?.token_hash === 'string' ? share.token_hash : '')),
+  )
+  return c.json({ saved_at: savedAt }, 200, NO_STORE)
+})
 
 // 1. Interview: one message in, validated updates and the next question out.
 app.post('/api/interview/message', async (c) => {
@@ -224,15 +312,96 @@ app.post('/api/folder.zip', async (c) => {
 
 // 9. Share links: the token is random, only its hash is ever stored.
 app.post('/api/share', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  if (!sameOrigin(c.req.raw, c.env)) return c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE)
   const body = await readJson(c.req.raw)
   if (!body) return badJson()
   const permission: SharePermission = body.permission === 'mark_done' ? 'mark_done' : 'view'
   const scope = Array.isArray(body.scope) && body.scope.length ? (body.scope as never[]) : 'all'
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))
-  const token_hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
-  return c.json({ token, token_hash, permission, scope, expires_at: typeof body.expires_at === 'string' ? body.expires_at : null }, 201)
+  return c.json({ token, token_hash: await sha256Hex(token), permission, scope, expires_at: typeof body.expires_at === 'string' ? body.expires_at : null }, 201, NO_STORE)
+})
+
+/**
+ * The CA's side of a share link: no session, scoped to the categories the
+ * founder allowed, and it never hands back the record itself.
+ */
+async function sharedContext(c: Context<AppEnv>, token: string) {
+  const db = c.env.DB
+  if (!db) return { response: c.json({ error: 'Sharing needs the record store.' }, 503, NO_STORE) }
+  await ensureSchema(db)
+  const token_hash = await sha256Hex(token)
+  const owner = await shareOwner(db, token_hash)
+  if (!owner) return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  const row = await readRecord(db, owner)
+  if (!row) return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  let data: Record<string, unknown>
+  try {
+    data = JSON.parse(row.data) as Record<string, unknown>
+  } catch {
+    return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  }
+  const share = ((data.shares ?? []) as ShareLink[]).find((entry) => entry.token_hash === token_hash)
+  if (!share) return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  const when = today()
+  if (share.revoked_at) return { response: c.json({ error: 'This link was revoked.', reason: 'revoked' }, 410, NO_STORE) }
+  if (share.expires_at && share.expires_at < when) return { response: c.json({ error: 'This link has expired.', reason: 'expired' }, 410, NO_STORE) }
+
+  const knowledge = (data.knowledge ?? { facts: {} }) as Parameters<typeof deriveProfile>[0]
+  const profile = deriveProfile(knowledge)
+  const statuses = (data.statuses ?? {}) as Record<string, { status: 'open' | 'done' }>
+  const ticked = (data.ticked ?? {}) as Record<string, DocKey[]>
+  const obligations = evaluateRules(profile)
+  const { deadlines } = buildCalendar(profile, obligations, when, statuses)
+  const company = knowledgeToCompany(knowledge)
+  const visible = share.scope === 'all' ? deadlines : deadlines.filter((d) => (share.scope as string[]).includes(d.group))
+  return {
+    owner,
+    data,
+    share,
+    when,
+    payload: {
+      permission: share.permission,
+      scope: share.scope,
+      expires_at: share.expires_at,
+      company: company.name ?? '',
+      today: when,
+      deadlines: visible,
+      summary: summarise(visible),
+      checklists: Object.fromEntries(
+        visible.map((d) => [d.id, checklistFor(d, company, ticked[d.id] ?? []).map((i) => ({ label: i.label, state: i.state }))]),
+      ),
+    },
+  }
+}
+
+app.get('/api/share/:token', async (c) => {
+  const token = c.req.param('token')
+  if (!token) return c.json({ error: 'Send the link token.' }, 422, NO_STORE)
+  const context = await sharedContext(c, token)
+  if (!context.payload) return context.response
+  return c.json(context.payload, 200, NO_STORE)
+})
+
+app.post('/api/share/:token/done', async (c) => {
+  const token = c.req.param('token')
+  if (!token) return c.json({ error: 'Send the link token.' }, 422, NO_STORE)
+  if (!sameOrigin(c.req.raw, c.env)) return c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE)
+  const context = await sharedContext(c, token)
+  if (!context.payload) return context.response
+  if (context.share.permission !== 'mark_done') return c.json({ error: 'This link is view only.' }, 403, NO_STORE)
+  const body = await readJson(c.req.raw)
+  const id = typeof body?.id === 'string' ? body.id : ''
+  if (!id) return c.json({ error: 'Send the deadline id.' }, 422, NO_STORE)
+
+  const data = context.data as { statuses?: Record<string, unknown>; activity?: unknown[] }
+  const statuses = { ...(data.statuses ?? {}), [id]: { status: 'done', done_at: new Date().toISOString(), done_by: 'ca' } }
+  const activity = [{ id: crypto.randomUUID(), at: new Date().toISOString(), actor: 'ca', action: 'Marked done', detail: id }, ...(Array.isArray(data.activity) ? data.activity : [])].slice(0, 80)
+  if (c.env.DB && context.owner) await writeRecord(c.env.DB, context.owner, JSON.stringify({ ...data, statuses, activity }))
+  const next = await sharedContext(c, token)
+  return c.json({ ok: true, payload: next.payload ?? context.payload }, 200, NO_STORE)
 })
 
 app.post('/api/share/revoke', async (c) => {
@@ -242,7 +411,7 @@ app.post('/api/share/revoke', async (c) => {
   return c.json({ revoked_at: new Date().toISOString(), id: body.id ?? null })
 })
 
-// 10. CA matching: weighted scoring with reasons.
+// 10. CA matching: weighted scoring with reasons. The directory is empty until real firms are onboarded.
 app.post('/api/cas/match', async (c) => {
   const body = await readJson(c.req.raw)
   if (!body) return badJson()

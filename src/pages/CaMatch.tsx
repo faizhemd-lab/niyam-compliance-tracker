@@ -57,6 +57,31 @@ export function CaMatch() {
     )
   }
 
+  if (!CAS.length) {
+    return (
+      <Shell>
+        <Header />
+        <PageHead
+          eyebrow="Find a CA"
+          title="The directory is not open yet"
+          intro="The matcher is built and scores real obligations, but no firms have been onboarded, so there is nobody to match you with. No placeholder accountants are listed here."
+        />
+        <Card className="mt-2">
+          <EmptyState
+            title="No firms listed"
+            body="Your own CA can still review the calendar: create a scoped share link and send it to them. It opens on any device, without an account."
+            action={
+              <ButtonLink to="/share" variant="violet">
+                Share your calendar
+              </ButtonLink>
+            }
+          />
+        </Card>
+        <Footer />
+      </Shell>
+    )
+  }
+
   return (
     <Shell>
       <Header />
@@ -85,7 +110,6 @@ export function CaMatch() {
         }
       >
         <div className="mt-5 flex flex-wrap gap-2">
-          <Badge tone="outline">Sample directory</Badge>
           <Badge tone="success">Real scoring</Badge>
           <span className="text-[12.5px] text-muted">
             {loading ? 'Scoring…' : `Scored ${CAS.length} accountants`} · computed {source === 'server' ? 'on the app server' : 'in your browser'}

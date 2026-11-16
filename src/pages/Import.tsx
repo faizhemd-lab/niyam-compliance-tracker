@@ -1,11 +1,11 @@
-import { ArrowRight, FileSpreadsheet, Upload, Wand2 } from 'lucide-react'
+import { ArrowRight, FileSpreadsheet, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 
 import { useDocumentTitle } from '../lib/storage'
 import { useTracker } from '../lib/tracker'
 import { postJson } from '../lib/api'
 import { knowledgeFromCompany } from '../shared/knowledge'
-import { IMPORT_FIELDS, SAMPLE_CSV, applyMapping, parseCsv, proposeMapping, type ImportResult, type Mapping } from '../shared/validation'
+import { IMPORT_FIELDS, applyMapping, parseCsv, proposeMapping, type ImportResult, type Mapping } from '../shared/validation'
 import { Header, PageHead, Shell } from '../components/AppShell'
 import { Badge } from '../components/Bits'
 import { Button, ButtonLink } from '../components/Button'
@@ -76,9 +76,6 @@ export function ImportPage() {
         <Card as="section" className="px-5 py-6 sm:px-7">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-[16px] font-medium tracking-[-0.02em]">1. Add your sheet</h2>
-            <Button variant="ghost" size="sm" icon={<Wand2 className="size-4" />} onClick={() => { setCsv(SAMPLE_CSV); void analyse(SAMPLE_CSV) }}>
-              Use the sample
-            </Button>
           </div>
           <p className="mt-1 text-[13px] text-muted">Paste CSV, or upload a file. In Excel or Google Sheets use File → Download → CSV.</p>
 
