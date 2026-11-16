@@ -61,7 +61,7 @@ export function Header() {
                 <ButtonLink to="/login" variant="outline" size="sm" className="hidden sm:inline-flex">
                   Sign in
                 </ButtonLink>
-                <ButtonLink to="/login" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
+                <ButtonLink to="/signup" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
                   Get started
                 </ButtonLink>
               </>

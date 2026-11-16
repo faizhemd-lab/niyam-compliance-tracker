@@ -1,4 +1,4 @@
-import { ClerkProvider, SignIn, useAuth, useClerk, useUser } from '@clerk/react'
+import { ClerkProvider, SignIn, SignUp, useAuth, useClerk, useUser } from '@clerk/react'
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router'
 
@@ -113,7 +113,27 @@ export function RequireAuth() {
 /** Clerk's own sign-in surface, or nothing when the build has no key. */
 export function SessionSignIn({ fallback = '/agent' }: { fallback?: string }) {
   if (!publishableKey) return null
-  return <SignIn routing="hash" fallbackRedirectUrl={fallback} signUpFallbackRedirectUrl={fallback} />
+  return (
+    <SignIn routing="hash" signUpUrl="/signup" fallbackRedirectUrl={fallback} signUpFallbackRedirectUrl={fallback} />
+  )
+}
+
+/**
+ * Sign-up, kept on this origin. Clerk's default is its hosted Account Portal on
+ * another domain, and a brand-new user lands there with no way back into the
+ * app; `signUpUrl` on the sign-in surface sends them here instead. Sign-up is
+ * sign-in afterwards: `fallbackRedirectUrl` takes them into the app.
+ */
+export function SessionSignUp({ fallback = '/agent' }: { fallback?: string }) {
+  if (!publishableKey) return null
+  return (
+    <SignUp
+      routing="hash"
+      signInUrl="/login"
+      fallbackRedirectUrl={fallback}
+      signInFallbackRedirectUrl={fallback}
+    />
+  )
 }
 
 export function SessionSplash({ label = 'Loading your record…' }: { label?: string }) {

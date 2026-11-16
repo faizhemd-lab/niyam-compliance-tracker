@@ -66,7 +66,7 @@ export function Home() {
                 </ButtonLink>
               ) : (
                 <>
-                  <ButtonLink to="/login" variant="violet" size="lg" iconRight={<ArrowRight className="size-4" />}>
+                  <ButtonLink to="/signup" variant="violet" size="lg" iconRight={<ArrowRight className="size-4" />}>
                     Get started
                   </ButtonLink>
                   <ButtonLink to="/login" variant="outline" size="lg">

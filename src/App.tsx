@@ -19,6 +19,7 @@ import { Obligations } from './pages/Obligations'
 import { Reminders } from './pages/Reminders'
 import { SharePage } from './pages/Share'
 import { ShareView } from './pages/ShareView'
+import { Signup } from './pages/Signup'
 
 function ScrollManager() {
   const { pathname, hash } = useLocation()
@@ -76,6 +77,7 @@ export function App() {
                   {/* Public: the landing page, sign-in, and a CA's share link. */}
                   <Route index element={<Home />} />
                   <Route path="login" element={<Login />} />
+                  <Route path="signup" element={<Signup />} />
                   <Route path="s/:token" element={<ShareView />} />
 
                   {/* Everything else is the product, and needs a session first. */}
