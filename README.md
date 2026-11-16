@@ -198,6 +198,47 @@ cp .dev.vars.example .dev.vars   # includes ENVIRONMENT=development
 bun run dev
 ```
 
+### Running app
+
+| Where | URL |
+| --- | --- |
+| Local | <http://localhost:5305> |
+| Deployed preview (Sites, preview environment) | <https://site-e7e807e9de1947f2bbfcc882cf250287.freebuff.page> |
+
+Sign-in page: `/login`. The preview site id is
+`7f3c1b2a-9d4e-4a6b-8c1d-2e3f4a5b6c7d`, with D1 binding `DB` and the public
+`CLERK_PUBLISHABLE_KEY` set; `APP_ORIGIN` is injected by the platform.
+
+### Clerk CLI on Windows
+
+`npx -y clerk@latest` fails on Windows with `Unsupported or missing platform:
+win32-x64` — the CLI resolves `@clerk/cli-win32-x64`, and npx never installs it.
+Install that package into `.tools/` (gitignored) and call the binary directly:
+
+```sh
+# one-time install of the Windows binary
+npm i --no-save --prefix .tools/clerk-cli @clerk/cli-win32-x64
+chmod +x .tools/clerk-cli/node_modules/@clerk/cli-win32-x64/bin/clerk.exe
+
+CLERK=.tools/clerk-cli/node_modules/@clerk/cli-win32-x64/bin/clerk.exe
+
+$CLERK auth login     # opens the browser; approve there
+$CLERK link --app app_3M9T5KvPDUOlFtWOLHvhbJDgFUp
+$CLERK env pull       # writes .env.local (gitignored)
+$CLERK doctor         # logged in, linked, application reachable
+$CLERK auth logout
+```
+
+Do **not** run `clerk init` here: the project already uses `@clerk/react`, and
+init would create a second Clerk application and overwrite the keys. The
+Dashboard entry for this project says “Next.js”, which does not describe this
+Vite + Hono Worker app — use the app id above, not the framework guess.
+
+`env pull` writes `VITE_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` to
+`.env.local`. Only the publishable key is needed at runtime: copy it into
+`.dev.vars` as `CLERK_PUBLISHABLE_KEY` alongside
+`APP_ORIGIN=http://localhost:5305`. Both files are gitignored.
+
 ## API
 
 Computational routes are stateless pure functions of their payload. The record
