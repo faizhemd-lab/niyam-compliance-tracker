@@ -4,11 +4,15 @@ import { compileDeadline, checklistFor, checklistProgress } from '../src/shared/
 import { evaluateRules } from '../src/shared/rules'
 import { buildCalendar } from '../src/shared/schedule'
 import type { Company, Profile } from '../src/shared/types'
-import { applyMapping, parseCsv, proposeMapping, SAMPLE_CSV } from '../src/shared/validation'
+import { applyMapping, parseCsv, proposeMapping } from '../src/shared/validation'
+
+// Test data only: a fictional company in the shape a founder's sheet might take.
+const SHEET = `Company name,Constitution,State,Turnover,Employees,GST status,Incorporated on,PAN,GSTIN,Director name,DIN
+Northwind Labs Private Limited,Private Limited,Telangana,6000000,12,No,2026-04-01,ABCDE1234F,,Ananya Rao,01234567`
 
 describe('CSV import', () => {
-  it('maps the sample sheet and imports it cleanly', () => {
-    const table = parseCsv(SAMPLE_CSV)
+  it('maps a typical sheet and imports it cleanly', () => {
+    const table = parseCsv(SHEET)
     const result = applyMapping(table, proposeMapping(table.headers))
     expect(result.errors).toEqual([])
     expect(result.missing).toEqual([])
@@ -58,14 +62,16 @@ describe('documents', () => {
   it('files drafts under the financial year, the law and the due date', () => {
     const { folder, files } = compileDeadline(COMPANY, agm, '2026-11-16')
     expect(folder).toBe('FY2027-28/Companies-Act/AGM-2027-09-30')
-    expect(files.map((f) => f.path.split('/').at(-1))).toEqual(['01_Board-Resolution_DRAFT.html', '02_Notice-of-AGM_DRAFT.html', '_checklist.html', '_manifest.json'])
+    expect(files.every((f) => f.path.startsWith(`${folder}/`))).toBe(true)
+    expect(files.map((f) => f.path.split('/').at(-1)).sort()).toEqual(['00_Filing-Cover_DRAFT.html', '01_Board-Resolution_DRAFT.html', '02_Financial-Summary_DRAFT.html', '02_Notice-of-AGM_DRAFT.html', '_checklist.html', '_manifest.json'])
   })
 
   it('writes a manifest naming the rule version and the files', () => {
     const { files } = compileDeadline(COMPANY, agm, '2026-11-16')
     const manifest = JSON.parse(files.find((f) => f.path.endsWith('_manifest.json'))!.content)
     expect(manifest).toMatchObject({ obligation: 'agm', rule_version: agm.rule_version, due_date: '2027-09-30' })
-    expect(manifest.files).toHaveLength(3)
+    // Every file except the manifest itself.
+    expect(manifest.files).toHaveLength(files.length - 1)
   })
 
   it('reports missing fields instead of producing a half-empty document silently', () => {

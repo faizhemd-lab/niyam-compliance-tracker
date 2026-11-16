@@ -71,8 +71,8 @@ export function Documents() {
                   Compile the next deadline
                 </ButtonLink>
               ) : (
-                <ButtonLink to="/interview" variant="violet">
-                  Check my compliance
+                <ButtonLink to="/agent" variant="violet">
+                  Ask the agent what applies
                 </ButtonLink>
               )
             }

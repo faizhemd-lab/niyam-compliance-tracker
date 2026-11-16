@@ -4,7 +4,7 @@ import { evaluateRules } from '../src/shared/rules'
 import { buildCalendar } from '../src/shared/schedule'
 import { createShareToken, hashToken, inScope, shareAccess, visibleDeadlines } from '../src/shared/sharing'
 import type { Profile, ShareLink } from '../src/shared/types'
-import app from '../src/worker/index'
+import worker from '../src/worker/index'
 
 const TODAY = '2026-11-16'
 
@@ -85,24 +85,22 @@ describe('scope', () => {
   })
 })
 
-describe('POST /api/share', () => {
-  const post = (body: unknown) => app.request('/api/share', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })
+describe('share routes', () => {
+  const call = (path: string, init?: RequestInit) => worker.fetch(new Request(`http://localhost${path}`, init), {})
 
-  it('returns a token with its hash, defaulting to view-only and the whole company', async () => {
-    const res = await post({})
-    expect(res.status).toBe(201)
-    const json = (await res.json()) as { token: string; token_hash: string; permission: string; scope: unknown; expires_at: unknown }
-    expect(json.token_hash).toBe(await hashToken(json.token))
-    expect(json).toMatchObject({ permission: 'view', scope: 'all', expires_at: null })
+  it('refuse to create a link without a signed-in founder', async () => {
+    const res = await call('/api/share', { method: 'POST', body: JSON.stringify({ permission: 'mark_done' }) })
+    expect([401, 503]).toContain(res.status)
+    expect(await res.text()).not.toContain('token_hash')
   })
 
-  it('only grants mark-done when asked for exactly that', async () => {
-    const res = await post({ permission: 'admin' })
-    expect(((await res.json()) as { permission: string }).permission).toBe('view')
+  it('refuse to open a link when there is no record store', async () => {
+    const res = await call('/api/share/0123456789abcdef0123456789abcdef')
+    expect(res.status).toBe(503)
   })
 
-  it('rejects a body that is not a JSON object', async () => {
-    const res = await app.request('/api/share', { method: 'POST', body: '[1,2]' })
-    expect(res.status).toBe(400)
+  it('refuse a CA mark-done when there is no record store', async () => {
+    const res = await call('/api/share/0123456789abcdef0123456789abcdef/done', { method: 'POST', body: JSON.stringify({ id: 'x' }) })
+    expect(res.status).toBe(503)
   })
 })

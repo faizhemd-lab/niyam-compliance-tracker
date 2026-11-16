@@ -1,10 +1,11 @@
-import { ArrowRight, FileSpreadsheet, Upload, Wand2 } from 'lucide-react'
+import { ArrowRight, FileSpreadsheet, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 
 import { useDocumentTitle } from '../lib/storage'
 import { useTracker } from '../lib/tracker'
 import { postJson } from '../lib/api'
-import { IMPORT_FIELDS, SAMPLE_CSV, applyMapping, parseCsv, proposeMapping, type ImportResult, type Mapping } from '../shared/validation'
+import { knowledgeFromCompany } from '../shared/knowledge'
+import { IMPORT_FIELDS, applyMapping, parseCsv, proposeMapping, type ImportResult, type Mapping } from '../shared/validation'
 import { Header, PageHead, Shell } from '../components/AppShell'
 import { Badge } from '../components/Bits'
 import { Button, ButtonLink } from '../components/Button'
@@ -17,7 +18,7 @@ type Preview = { headers: string[]; rows: string[][]; mapping: Mapping; preview:
 
 export function ImportPage() {
   useDocumentTitle('Import your company data')
-  const { mergeProfile, log, company } = useTracker()
+  const { setKnowledge, knowledge, log, company } = useTracker()
   const toast = useToast()
   const fileRef = useRef<HTMLInputElement>(null)
   const [csv, setCsv] = useState('')
@@ -53,9 +54,10 @@ export function ImportPage() {
     const applied = res.ok ? res.data : local
     setResult(applied)
     if (Object.keys(applied.updates).length) {
-      mergeProfile(applied.updates, `Imported ${applied.applied} rows from a sheet`)
+      const imported = knowledgeFromCompany({ ...company, ...applied.updates }, 'import')
+      setKnowledge({ facts: { ...knowledge.facts, ...imported.facts } }, `Imported ${Object.keys(applied.updates).join(', ')} from a sheet`)
       log('Imported company data', `${Object.keys(applied.updates).join(', ')}`)
-      toast('Imported. Check the answers on the calendar — the rules engine has already re-run.')
+      toast('Imported. The agent knows these facts now — ask it to draft the next filing.')
     }
     setBusy(false)
   }
@@ -66,7 +68,7 @@ export function ImportPage() {
       <PageHead
         eyebrow="Company database plug-in"
         title="Stop retyping your own data"
-        intro="Upload a CSV exported from your spreadsheet or accounting tool. The tracker detects the headers, proposes a mapping, validates every value, and skips the interview questions your data already answers."
+        intro="Upload a CSV exported from your spreadsheet or accounting tool. The tracker detects the headers, proposes a mapping, validates every value, and hands the result to the agent as known facts."
         actions={<Badge tone="outline">CSV and spreadsheet exports</Badge>}
       />
 
@@ -74,9 +76,6 @@ export function ImportPage() {
         <Card as="section" className="px-5 py-6 sm:px-7">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-[16px] font-medium tracking-[-0.02em]">1. Add your sheet</h2>
-            <Button variant="ghost" size="sm" icon={<Wand2 className="size-4" />} onClick={() => { setCsv(SAMPLE_CSV); void analyse(SAMPLE_CSV) }}>
-              Use the sample
-            </Button>
           </div>
           <p className="mt-1 text-[13px] text-muted">Paste CSV, or upload a file. In Excel or Google Sheets use File → Download → CSV.</p>
 
@@ -207,7 +206,7 @@ export function ImportPage() {
               )}
               {result.missing.length > 0 && (
                 <p className="mt-3 rounded-[var(--radius-control)] bg-soft px-3 py-2 text-[12.5px] text-muted">
-                  Still missing: {result.missing.join(', ')}. The interview will ask for {result.missing.length === 1 ? 'it' : 'them'}.
+                  Still missing: {result.missing.join(', ')}. The agent will ask for {result.missing.length === 1 ? 'it' : 'them'}.
                 </p>
               )}
               <ButtonLink to="/obligations" variant="outline" size="sm" className="mt-4">
@@ -238,8 +237,8 @@ export function ImportPage() {
               <ButtonLink to="/company" variant="outline" size="sm">
                 Review the record
               </ButtonLink>
-              <ButtonLink to="/interview" variant="ghost" size="sm">
-                Finish the interview
+              <ButtonLink to="/agent" variant="ghost" size="sm">
+                Talk to the agent
               </ButtonLink>
             </div>
           </Card>

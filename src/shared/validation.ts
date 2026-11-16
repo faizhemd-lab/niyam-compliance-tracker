@@ -190,7 +190,3 @@ export function applyMapping(table: CsvTable, mapping: Mapping): ImportResult {
   return { updates, applied, skipped, errors, missing: [...missing] }
 }
 
-/** The sample sheet offered on the import page, so the flow can be tried at once. */
-export const SAMPLE_CSV = `Company name,Constitution,State,Turnover,Employees,GST status,Incorporated on,PAN,GSTIN,Director name,DIN
-Northwind Labs Private Limited,Private Limited,Telangana,6000000,12,No,2026-04-01,ABCDE1234F,,Ananya Rao,01234567
-Cedar & Co,LLP,Karnataka,2500000,25,Yes,2024-11-12,PQRST5678G,29PQRST5678G1Z5,Ravi Kumar,07654321`

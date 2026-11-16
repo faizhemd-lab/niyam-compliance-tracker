@@ -1,21 +1,24 @@
 import { MotionConfig, motion } from 'motion/react'
 import { useEffect } from 'react'
-import { BrowserRouter, Route, Routes, useLocation } from 'react-router'
+import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from 'react-router'
 
 import { ToastProvider } from './components/Overlay'
+import { RequireAuth, SessionProvider } from './lib/session'
 import { TrackerProvider } from './lib/tracker'
+import { Agent } from './pages/Agent'
 import { CalendarPage } from './pages/Calendar'
 import { CompanyPage } from './pages/Company'
 import { DeadlinePage } from './pages/Deadline'
 import { Documents } from './pages/Documents'
 import { Home } from './pages/Home'
 import { ImportPage } from './pages/Import'
-import { Interview } from './pages/Interview'
+import { Login } from './pages/Login'
 import { NotFound } from './pages/NotFound'
 import { Obligations } from './pages/Obligations'
 import { Reminders } from './pages/Reminders'
 import { SharePage } from './pages/Share'
 import { ShareView } from './pages/ShareView'
+import { Signup } from './pages/Signup'
 
 function ScrollManager() {
   const { pathname, hash } = useLocation()
@@ -32,7 +35,7 @@ function ScrollManager() {
   return null
 }
 
-function Pages() {
+function PageFrame() {
   const location = useLocation()
   return (
     <motion.main
@@ -43,21 +46,17 @@ function Pages() {
       transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
       className="flex-1"
     >
-      <Routes location={location}>
-        <Route index element={<Home />} />
-        <Route path="interview" element={<Interview />} />
-        <Route path="obligations" element={<Obligations />} />
-        <Route path="calendar" element={<CalendarPage />} />
-        <Route path="deadline/:id" element={<DeadlinePage />} />
-        <Route path="documents" element={<Documents />} />
-        <Route path="reminders" element={<Reminders />} />
-        <Route path="share" element={<SharePage />} />
-        <Route path="s/:token" element={<ShareView />} />
-        <Route path="import" element={<ImportPage />} />
-        <Route path="company" element={<CompanyPage />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
+      <Outlet />
     </motion.main>
+  )
+}
+
+/** Everything inside needs a session and the client's own record. */
+function TrackerGate() {
+  return (
+    <TrackerProvider>
+      <Outlet />
+    </TrackerProvider>
   )
 }
 
@@ -65,17 +64,43 @@ export function App() {
   return (
     <MotionConfig reducedMotion="user">
       <BrowserRouter>
-        <TrackerProvider>
+        <SessionProvider>
           <ToastProvider>
             <ScrollManager />
             <a href="#main" className="sr-only z-[100] rounded-full bg-violet px-5 py-3 text-white focus:not-sr-only focus:fixed focus:top-3 focus:left-3">
               Skip to content
             </a>
             <div id="top" className="flex min-h-svh flex-col">
-              <Pages />
+              <Routes>
+                <Route element={<PageFrame />}>
+                  {/* Public: the landing page, sign-in, and a CA's share link. */}
+                  <Route index element={<Home />} />
+                  <Route path="login" element={<Login />} />
+                  <Route path="signup" element={<Signup />} />
+                  <Route path="s/:token" element={<ShareView />} />
+
+                  {/* Everything else is the product, and needs a session first. */}
+                  <Route element={<RequireAuth />}>
+                    <Route element={<TrackerGate />}>
+                      <Route path="agent" element={<Agent />} />
+                      <Route path="interview" element={<Navigate to="/agent" replace />} />
+                      <Route path="obligations" element={<Obligations />} />
+                      <Route path="calendar" element={<CalendarPage />} />
+                      <Route path="deadline/:id" element={<DeadlinePage />} />
+                      <Route path="documents" element={<Documents />} />
+                      <Route path="reminders" element={<Reminders />} />
+                      <Route path="share" element={<SharePage />} />
+                      <Route path="import" element={<ImportPage />} />
+                      <Route path="company" element={<CompanyPage />} />
+                    </Route>
+                  </Route>
+
+                  <Route path="*" element={<NotFound />} />
+                </Route>
+              </Routes>
             </div>
           </ToastProvider>
-        </TrackerProvider>
+        </SessionProvider>
       </BrowserRouter>
     </MotionConfig>
   )

@@ -1,45 +1,46 @@
 @import 'tailwindcss';
 
 /*
-  Lastwerk design tokens. The page is a pale grey canvas holding white panels
-  ("cards") with big radii, set in one tight grotesk. Violet is the only
-  colour; the iridescent artwork (src/components/Holo.tsx) carries the rest.
+  Design tokens. A pale blue-white canvas holding white panels ("cards") with
+  big radii, set in one tight grotesk. Navy carries the text and dark panels,
+  royal blue is the accent (the `violet` token names are kept so no component
+  changes), and white is the surface. Urgency colours live in Status.tsx.
   Everything rounded is a squircle; true circles opt out with .round.
 */
 @theme {
   --font-sans: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 
-  --color-canvas: #e9e9ec;
+  --color-canvas: #e8eef8;
   --color-card: #ffffff;
-  --color-soft: #f3f3f5;
-  --color-line: #e3e3e8;
-  --color-line-strong: #c9c9d1;
-  --color-ink: #0b0b0c;
-  --color-ink-2: #26262b;
-  --color-muted: #5c5c66;
-  --color-faint: #9b9ba5;
-  --color-night: #050505;
-  --color-night-2: #151517;
-  --color-night-muted: #a6a6b0;
-  --color-violet: #5b14f5;
-  --color-violet-deep: #4207c4;
-  --color-violet-soft: #ede6ff;
-  --color-violet-light: #b9a2ff;
-  --color-pink: #ff8ad8;
-  --color-cyan: #74e3ff;
+  --color-soft: #f2f5fc;
+  --color-line: #dde4f2;
+  --color-line-strong: #c2cde3;
+  --color-ink: #0a1a40;
+  --color-ink-2: #1b2b57;
+  --color-muted: #4f5d80;
+  --color-faint: #8d99b8;
+  --color-night: #06133a;
+  --color-night-2: #0e1f52;
+  --color-night-muted: #a9b7da;
+  --color-violet: #2a55e0;
+  --color-violet-deep: #1b3aa8;
+  --color-violet-soft: #e5ecff;
+  --color-violet-light: #9fb6ff;
+  --color-pink: #6f93ff;
+  --color-cyan: #a8d8ff;
   --color-success: #13764a;
   --color-danger: #c0262d;
-  --color-scrim: #0b0b0c;
+  --color-scrim: #0a1a40;
 
   --radius-xs: 10px;
   --radius-control: 16px;
   --radius-card-sm: 22px;
   --radius-card: 30px;
 
-  --shadow-card: 0 1px 0 rgb(255 255 255 / 0.9) inset, 0 24px 48px -32px rgb(20 10 60 / 0.18);
-  --shadow-float: 0 30px 80px -24px rgb(16 6 50 / 0.35);
-  --shadow-violet: 0 24px 60px -24px rgb(91 20 245 / 0.65);
-  --shadow-focus: 0 0 0 3px rgb(91 20 245 / 0.28);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 0.9) inset, 0 24px 48px -32px rgb(10 26 64 / 0.18);
+  --shadow-float: 0 30px 80px -24px rgb(10 26 64 / 0.35);
+  --shadow-violet: 0 24px 60px -24px rgb(42 85 224 / 0.55);
+  --shadow-focus: 0 0 0 3px rgb(42 85 224 / 0.3);
 
   --duration-fast: 160ms;
   --duration-base: 320ms;
@@ -232,7 +233,7 @@
 }
 
 @utility skeleton {
-  background: linear-gradient(90deg, var(--color-soft) 0%, #e8e8ee 50%, var(--color-soft) 100%);
+  background: linear-gradient(90deg, var(--color-soft) 0%, #e3eaf7 50%, var(--color-soft) 100%);
   background-size: 200% 100%;
   animation: var(--animate-shimmer);
 }

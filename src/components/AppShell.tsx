@@ -1,11 +1,12 @@
-import { ArrowUpRight, Menu, X } from 'lucide-react'
+import { ArrowUpRight, LogOut, Menu, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useState, type ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router'
 
 import { MENU, NAV, SITE } from '../data'
 import { cx } from '../lib/cx'
-import { useTracker } from '../lib/tracker'
+import { useSession } from '../lib/session'
+import { useTrackerOptional } from '../lib/tracker'
 import { Logo } from './Bits'
 import { ButtonLink, IconButton } from './Button'
 import { Card } from './Card'
@@ -13,7 +14,10 @@ import { Card } from './Card'
 /** The header that sits at the top of every page: white pill on the canvas. */
 export function Header() {
   const [open, setOpen] = useState(false)
-  const { summary } = useTracker()
+  const { status, user, signOut } = useSession()
+  const tracker = useTrackerOptional()
+  const signedIn = status === 'signed-in'
+  const entries = signedIn ? MENU : [{ to: '/', label: 'Home' }, { to: '/login', label: 'Sign in' }]
   return (
     <>
       <header className="sticky top-2 z-40 px-2">
@@ -21,7 +25,7 @@ export function Header() {
           <Link to="/" aria-label={`${SITE.name} home`} className="round flex items-center gap-2.5 rounded-full">
             <Logo wordmark />
           </Link>
-          <nav aria-label="Main" className="hidden lg:block">
+          <nav aria-label="Main" className={signedIn ? 'hidden lg:block' : 'hidden'}>
             <ul className="flex items-center gap-1">
               {NAV.map((item) => (
                 <li key={item.to}>
@@ -41,10 +45,27 @@ export function Header() {
             </ul>
           </nav>
           <div className="flex items-center gap-2">
-            <span className="caps hidden text-muted xl:inline">{summary.total} obligations</span>
-            <ButtonLink to="/interview" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
-              Check my compliance
-            </ButtonLink>
+            {signedIn ? (
+              <>
+                <span className="caps hidden text-muted xl:inline">{tracker?.summary.total ?? 0} obligations</span>
+                <span className="hidden max-w-[14rem] truncate text-[12.5px] text-muted md:inline">{user?.email ?? 'Signed in'}</span>
+                <ButtonLink to="/agent" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
+                  Open the app
+                </ButtonLink>
+                <IconButton aria-label="Sign out" tone="outline" size="sm" onClick={() => void signOut()} className="hidden sm:inline-flex">
+                  <LogOut className="size-4" />
+                </IconButton>
+              </>
+            ) : (
+              <>
+                <ButtonLink to="/login" variant="outline" size="sm" className="hidden sm:inline-flex">
+                  Sign in
+                </ButtonLink>
+                <ButtonLink to="/signup" variant="violet" size="sm" className="hidden sm:inline-flex" iconRight={<ArrowUpRight className="size-4" />}>
+                  Get started
+                </ButtonLink>
+              </>
+            )}
             <IconButton aria-label="Open menu" aria-expanded={open} tone="outline" size="sm" onClick={() => setOpen(true)} className="lg:hidden">
               <Menu className="size-4" />
             </IconButton>
@@ -73,7 +94,7 @@ export function Header() {
               </div>
               <nav aria-label="Menu" className="mt-8 flex-1">
                 <ul>
-                  {MENU.map((item) => (
+                  {entries.map((item) => (
                     <li key={item.to}>
                       <Link
                         to={item.to}
@@ -87,6 +108,19 @@ export function Header() {
                   ))}
                 </ul>
               </nav>
+              {signedIn && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false)
+                    void signOut()
+                  }}
+                  className="mt-6 flex items-center gap-2 text-sm font-medium text-violet-light"
+                >
+                  <LogOut className="size-4" aria-hidden />
+                  Sign out{user?.email ? ` · ${user.email}` : ''}
+                </button>
+              )}
               <p className="mt-8 text-sm text-night-muted">{SITE.notice}</p>
             </motion.div>
           </motion.div>

@@ -1,16 +1,23 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 
+import { modelStatus, resolvePending, runAgent } from '../shared/agent'
+import { runAutopilot } from '../shared/autopilot'
 import { CAS, RULES, RULE_VERSION } from '../shared/catalogue'
-import { compileDeadline } from '../shared/documents'
+import { compileDeadline, checklistFor } from '../shared/documents'
 import { classify, explain, extract, GATEWAY, maskIdentifiers } from '../shared/gateway'
+import { deriveProfile, knowledgeToCompany } from '../shared/knowledge'
 import { matchCAs } from '../shared/matching'
 import { runReminderJob } from '../shared/reminders'
 import { evaluateRules, missingFields, profileLine } from '../shared/rules'
 import { buildCalendar, summarise } from '../shared/schedule'
-import { createShareToken } from '../shared/sharing'
-import type { Company, Deadline, Profile, ReminderEntry, SharePermission } from '../shared/types'
+import { withDefaults, type CompanyRecord } from '../shared/record'
+import { createShareToken, shareAccess, visibleDeadlines } from '../shared/sharing'
+import type { Company, Deadline, DocKey, Profile, ReminderEntry, ShareLink, SharePermission } from '../shared/types'
 import { applyMapping, parseCsv, proposeMapping } from '../shared/validation'
 import { createZip } from '../shared/zip'
+import { authenticatedUser } from './auth'
+import { ensureSchema, listRecords, readRecord, sha256Hex, shareOwner, syncShares, writeRecord, writeRecordIf } from './db'
 
 /**
  * The Worker behind the app. It holds the rules engine, the calendar service,
@@ -18,9 +25,54 @@ import { createZip } from '../shared/zip'
  * profile always produces the same calendar. The browser keeps the founder's
  * own record and statuses; every route here is a pure function of its payload.
  */
-type Env = { ASSETS: Fetcher }
+type Env = {
+  /** Static assets binding; absent where a platform serves the assets itself. */
+  ASSETS?: Fetcher
+  /** The per-client record. See src/worker/db.ts. */
+  DB?: D1Database
+  /** Clerk session-token verification. See src/worker/auth.ts. */
+  CLERK_PUBLISHABLE_KEY?: string
+  CLERK_JWT_KEY?: string
+  CLERK_JWKS_URL?: string
+  APP_ORIGIN?: string
+  ENVIRONMENT?: string
+  /** Point these at a self-hosted Ollama, llama.cpp or vLLM server. */
+  MODEL_BASE_URL?: string
+  MODEL_NAME?: string
+  MODEL_API_KEY?: string
+}
 
-const app = new Hono<{ Bindings: Env }>()
+type AppEnv = { Bindings: Env }
+
+const app = new Hono<AppEnv>()
+
+/** Personalized answers are never cached, by us or by a proxy. */
+const NO_STORE = { 'cache-control': 'private, no-store' } as const
+
+function unauthorised(c: Context<AppEnv>, reason: 'unconfigured' | 'unauthorized') {
+  return reason === 'unconfigured'
+    ? c.json({ error: 'Sign-in is not configured on this deployment yet.', code: 'auth_unconfigured' }, 503, NO_STORE)
+    : c.json({ error: 'Sign in to use this.', code: 'unauthorized' }, 401, NO_STORE)
+}
+
+/** The signed-in client, or the response that refuses the request. */
+async function authFor(c: Context<AppEnv>) {
+  const result = await authenticatedUser(c.req.raw, c.env)
+  return result.user ? { user: result.user, response: null } : { user: null, response: unauthorised(c, result.reason) }
+}
+
+/** Writes must come from this app's own origin. */
+function sameOrigin(request: Request, env: Env) {
+  const origin = request.headers.get('origin')
+  if (!origin) return true
+  const here = new URL(request.url).origin
+  if (origin.replace(/\/$/, '') === here) return true
+  const allowed = (env.APP_ORIGIN ?? '')
+    .split(',')
+    .map((value) => value.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+  return allowed.includes(origin.replace(/\/$/, ''))
+}
 
 const today = () => new Date().toISOString().slice(0, 10)
 
@@ -52,6 +104,72 @@ function validateProfile(profile: Profile) {
 
 app.get('/api/health', (c) => c.json({ ok: true, rules: RULES.length, rule_version: RULE_VERSION, gateway: GATEWAY.engine }))
 
+// 0. Who is signed in, and the one company record they own.
+app.get('/api/me', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  return c.json({ user: auth.user }, 200, NO_STORE)
+})
+
+app.get('/api/record', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  if (!c.env.DB) return c.json({ error: 'The record store is not configured on this deployment.' }, 503, NO_STORE)
+  await ensureSchema(c.env.DB)
+  const row = await readRecord(c.env.DB, auth.user.id)
+  if (!row) return c.json({ data: null, saved_at: null }, 200, NO_STORE)
+  try {
+    return c.json({ data: JSON.parse(row.data), saved_at: row.updated_at }, 200, NO_STORE)
+  } catch {
+    return c.json({ error: 'The stored record could not be read.' }, 500, NO_STORE)
+  }
+})
+
+app.put('/api/record', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  if (!sameOrigin(c.req.raw, c.env)) return c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE)
+  if (!c.env.DB) return c.json({ error: 'The record store is not configured on this deployment.' }, 503, NO_STORE)
+  const text = await c.req.text()
+  if (text.length > 512_000) return c.json({ error: 'That record is too large to save.' }, 413, NO_STORE)
+  let body: Record<string, unknown>
+  try {
+    body = JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return badJson()
+  }
+  const data = body?.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return c.json({ error: 'Send the record as { data: {} }.' }, 422, NO_STORE)
+  await ensureSchema(c.env.DB)
+  // A client that sends `base` (the saved_at it last saw) never overwrites a
+  // newer save — such as the agent's or the autopilot's — without seeing it.
+  let savedAt: string
+  if ('base' in body) {
+    const base = typeof body.base === 'string' ? body.base : null
+    const written = await writeRecordIf(c.env.DB, auth.user.id, JSON.stringify(data), base)
+    if (!written) {
+      const row = await readRecord(c.env.DB, auth.user.id)
+      let current: unknown = null
+      try {
+        current = row ? JSON.parse(row.data) : null
+      } catch {
+        current = null
+      }
+      return c.json({ error: 'The record changed on the server.', code: 'conflict', data: current, saved_at: row?.updated_at ?? null }, 409, NO_STORE)
+    }
+    savedAt = written
+  } else {
+    savedAt = await writeRecord(c.env.DB, auth.user.id, JSON.stringify(data))
+  }
+  const shares = Array.isArray((data as { shares?: unknown }).shares) ? ((data as { shares: { token_hash?: unknown }[] }).shares ?? []) : []
+  await syncShares(
+    c.env.DB,
+    auth.user.id,
+    shares.map((share) => (typeof share?.token_hash === 'string' ? share.token_hash : '')),
+  )
+  return c.json({ saved_at: savedAt }, 200, NO_STORE)
+})
+
 // 1. Interview: one message in, validated updates and the next question out.
 app.post('/api/interview/message', async (c) => {
   const body = await readJson(c.req.raw)
@@ -73,6 +191,92 @@ app.post('/api/interview/message', async (c) => {
 })
 
 // 2. Read or correct the company profile; recomputation happens from the result.
+// 1b. The agent: free-form conversation that keeps and updates the company record.
+app.get('/api/agent/status', async (c) => c.json(await modelStatus(c.env)))
+
+/**
+ * The agent's own access to the record: it loads the signed-in client's row
+ * from D1, works on it, and saves it back only if nobody else saved meanwhile.
+ * The browser sends nothing but the message.
+ */
+async function agentContext(c: Context<AppEnv>) {
+  const auth = await authFor(c)
+  if (!auth.user) return { response: auth.response }
+  if (!sameOrigin(c.req.raw, c.env)) return { response: c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE) }
+  const db = c.env.DB
+  if (!db) return { response: c.json({ error: 'The record store is not configured on this deployment.' }, 503, NO_STORE) }
+  await ensureSchema(db)
+  const row = await readRecord(db, auth.user.id)
+  let parsed: Partial<CompanyRecord> | null = null
+  if (row) {
+    try {
+      parsed = JSON.parse(row.data) as Partial<CompanyRecord>
+    } catch {
+      return { response: c.json({ error: 'The stored record could not be read.' }, 500, NO_STORE) }
+    }
+  }
+  return { db, userId: auth.user.id, record: withDefaults(parsed), base: row?.updated_at ?? null }
+}
+
+async function saveAgentRecord(db: D1Database, userId: string, record: CompanyRecord, base: string | null) {
+  const savedAt = await writeRecordIf(db, userId, JSON.stringify(record), base)
+  if (savedAt) await syncShares(db, userId, record.shares.map((s) => s.token_hash))
+  return savedAt
+}
+
+const CONFLICT = { error: 'Your record changed while the agent was working. Nothing was saved; send that again.', code: 'conflict' }
+
+app.post('/api/agent/message', async (c) => {
+  const context = await agentContext(c)
+  if (!context.record) return context.response
+  const body = await readJson(c.req.raw)
+  if (!body) return badJson()
+  // The agent reads the raw message so it can store PAN/GSTIN in masked form;
+  // masking happens again at the model boundary inside runAgent.
+  const message = typeof body.message === 'string' ? body.message.slice(0, 4000).trim() : ''
+  if (!message) return c.json({ error: 'Say something for the agent to work with.' }, 422, NO_STORE)
+  const reply = await runAgent(
+    {
+      record: context.record,
+      message,
+      today: typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : undefined,
+      language: body.language === 'hi' ? 'hi' : 'en',
+    },
+    c.env,
+  )
+  const savedAt = await saveAgentRecord(context.db, context.userId, reply.record, context.base)
+  if (!savedAt) return c.json(CONFLICT, 409, NO_STORE)
+  return c.json({ ...reply, saved_at: savedAt }, 200, NO_STORE)
+})
+
+// Approve or decline something the agent proposed (share links, revocations).
+app.post('/api/agent/approve', async (c) => {
+  const context = await agentContext(c)
+  if (!context.record) return context.response
+  const body = await readJson(c.req.raw)
+  if (!body || typeof body.id !== 'string') return c.json({ error: 'Send { id, approve }.' }, 422, NO_STORE)
+  const result = await resolvePending(context.record, body.id, body.approve === true)
+  const savedAt = await saveAgentRecord(context.db, context.userId, result.record, context.base)
+  if (!savedAt) return c.json(CONFLICT, 409, NO_STORE)
+  return c.json({ ok: result.ok, message: result.message, record: result.record, saved_at: savedAt }, result.ok ? 200 : 409, NO_STORE)
+})
+
+// Run the morning check now, for the signed-in client (optionally on the simulated clock).
+app.post('/api/agent/autopilot', async (c) => {
+  const context = await agentContext(c)
+  if (!context.record) return context.response
+  const body = (await readJson(c.req.raw)) ?? {}
+  const when = typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : today()
+  const { record, report } = runAutopilot(context.record, when, { force: true })
+  const savedAt = await saveAgentRecord(context.db, context.userId, record, context.base)
+  if (!savedAt) return c.json(CONFLICT, 409, NO_STORE)
+  return c.json(
+    { record, saved_at: savedAt, report: { ...report, overdue: report.overdue.length, due_soon: report.due_soon.length } },
+    200,
+    NO_STORE,
+  )
+})
+
 app.post('/api/company', async (c) => {
   const body = await readJson(c.req.raw)
   if (!body) return badJson()
@@ -167,7 +371,8 @@ app.post('/api/deadlines/compile', async (c) => {
   const deadline = body.deadline as Deadline | undefined
   if (!deadline?.rule_id) return c.json({ error: 'Send the deadline to compile.' }, { status: 422 })
   const ticked = Array.isArray(body.ticked) ? (body.ticked as never[]) : []
-  const result = compileDeadline(company, deadline, typeof body.today === 'string' ? body.today : today(), ticked)
+  const knowledge = body.knowledge as Parameters<typeof compileDeadline>[4]
+  const result = compileDeadline(company, deadline, typeof body.today === 'string' ? body.today : today(), ticked, knowledge)
   return c.json(result)
 })
 
@@ -185,12 +390,96 @@ app.post('/api/folder.zip', async (c) => {
 
 // 9. Share links: the token is random, only its hash is ever stored.
 app.post('/api/share', async (c) => {
+  const auth = await authFor(c)
+  if (!auth.user) return auth.response
+  if (!sameOrigin(c.req.raw, c.env)) return c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE)
   const body = await readJson(c.req.raw)
   if (!body) return badJson()
   const permission: SharePermission = body.permission === 'mark_done' ? 'mark_done' : 'view'
   const scope = Array.isArray(body.scope) && body.scope.length ? (body.scope as never[]) : 'all'
   const { token, token_hash } = await createShareToken()
-  return c.json({ token, token_hash, permission, scope, expires_at: typeof body.expires_at === 'string' ? body.expires_at : null }, 201)
+  return c.json({ token, token_hash, permission, scope, expires_at: typeof body.expires_at === 'string' ? body.expires_at : null }, 201, NO_STORE)
+})
+
+/**
+ * The CA's side of a share link: no session, scoped to the categories the
+ * founder allowed, and it never hands back the record itself.
+ */
+async function sharedContext(c: Context<AppEnv>, token: string) {
+  const db = c.env.DB
+  if (!db) return { response: c.json({ error: 'Sharing needs the record store.' }, 503, NO_STORE) }
+  await ensureSchema(db)
+  const token_hash = await sha256Hex(token)
+  const owner = await shareOwner(db, token_hash)
+  if (!owner) return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  const row = await readRecord(db, owner)
+  if (!row) return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  let data: Record<string, unknown>
+  try {
+    data = JSON.parse(row.data) as Record<string, unknown>
+  } catch {
+    return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  }
+  const share = ((data.shares ?? []) as ShareLink[]).find((entry) => entry.token_hash === token_hash)
+  if (!share) return { response: c.json({ error: 'This link is not active.', reason: 'missing' }, 404, NO_STORE) }
+  const when = today()
+  const access = shareAccess(share, when)
+  if (access.state === 'revoked') return { response: c.json({ error: 'This link was revoked.', reason: 'revoked' }, 410, NO_STORE) }
+  if (access.state === 'expired') return { response: c.json({ error: 'This link has expired.', reason: 'expired' }, 410, NO_STORE) }
+
+  const knowledge = (data.knowledge ?? { facts: {} }) as Parameters<typeof deriveProfile>[0]
+  const profile = deriveProfile(knowledge)
+  const statuses = (data.statuses ?? {}) as Record<string, { status: 'open' | 'done' }>
+  const ticked = (data.ticked ?? {}) as Record<string, DocKey[]>
+  const obligations = evaluateRules(profile)
+  const { deadlines } = buildCalendar(profile, obligations, when, statuses)
+  const company = knowledgeToCompany(knowledge)
+  const visible = visibleDeadlines(share, deadlines, when)
+  return {
+    owner,
+    data,
+    share,
+    when,
+    payload: {
+      permission: share.permission,
+      scope: share.scope,
+      expires_at: share.expires_at,
+      company: company.name ?? '',
+      today: when,
+      deadlines: visible,
+      summary: summarise(visible),
+      checklists: Object.fromEntries(
+        visible.map((d) => [d.id, checklistFor(d, company, ticked[d.id] ?? []).map((i) => ({ label: i.label, state: i.state }))]),
+      ),
+    },
+  }
+}
+
+app.get('/api/share/:token', async (c) => {
+  const token = c.req.param('token')
+  if (!token) return c.json({ error: 'Send the link token.' }, 422, NO_STORE)
+  const context = await sharedContext(c, token)
+  if (!context.payload) return context.response
+  return c.json(context.payload, 200, NO_STORE)
+})
+
+app.post('/api/share/:token/done', async (c) => {
+  const token = c.req.param('token')
+  if (!token) return c.json({ error: 'Send the link token.' }, 422, NO_STORE)
+  if (!sameOrigin(c.req.raw, c.env)) return c.json({ error: 'Cross-origin writes are refused.' }, 403, NO_STORE)
+  const context = await sharedContext(c, token)
+  if (!context.payload) return context.response
+  if (!shareAccess(context.share, context.when).canMarkDone) return c.json({ error: 'This link is view only.' }, 403, NO_STORE)
+  const body = await readJson(c.req.raw)
+  const id = typeof body?.id === 'string' ? body.id : ''
+  if (!id) return c.json({ error: 'Send the deadline id.' }, 422, NO_STORE)
+
+  const data = context.data as { statuses?: Record<string, unknown>; activity?: unknown[] }
+  const statuses = { ...(data.statuses ?? {}), [id]: { status: 'done', done_at: new Date().toISOString(), done_by: 'ca' } }
+  const activity = [{ id: crypto.randomUUID(), at: new Date().toISOString(), actor: 'ca', action: 'Marked done', detail: id }, ...(Array.isArray(data.activity) ? data.activity : [])].slice(0, 80)
+  if (c.env.DB && context.owner) await writeRecord(c.env.DB, context.owner, JSON.stringify({ ...data, statuses, activity }))
+  const next = await sharedContext(c, token)
+  return c.json({ ok: true, payload: next.payload ?? context.payload }, 200, NO_STORE)
 })
 
 app.post('/api/share/revoke', async (c) => {
@@ -200,7 +489,7 @@ app.post('/api/share/revoke', async (c) => {
   return c.json({ revoked_at: new Date().toISOString(), id: body.id ?? null })
 })
 
-// 10. CA matching: weighted scoring with reasons.
+// 10. CA matching (paused: no page or agent tool calls this). Weighted scoring with reasons.
 app.post('/api/cas/match', async (c) => {
   const body = await readJson(c.req.raw)
   if (!body) return badJson()
@@ -226,6 +515,51 @@ app.post('/api/cron/reminders', async (c) => {
 })
 
 app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404))
-app.all('*', (c) => c.env.ASSETS.fetch(c.req.raw))
+app.all('*', (c) => (c.env.ASSETS ? c.env.ASSETS.fetch(c.req.raw) : c.text('Not found', 404)))
 
-export default app
+/**
+ * The daily autopilot (cron in wrangler.jsonc, 03:30 UTC = 09:00 IST). It walks
+ * every record, runs the morning check, and saves only where nobody saved in
+ * the meantime; a record that moved on is picked up again tomorrow.
+ */
+export async function runScheduledAutopilot(env: Env): Promise<{ checked: number; ran: number; conflicts: number }> {
+  const db = env.DB
+  if (!db) return { checked: 0, ran: 0, conflicts: 0 }
+  await ensureSchema(db)
+  const when = today()
+  let after = ''
+  let checked = 0
+  let ran = 0
+  let conflicts = 0
+  for (;;) {
+    const rows = await listRecords(db, after)
+    if (!rows.length) break
+    for (const row of rows) {
+      after = row.user_id
+      checked += 1
+      let parsed: Partial<CompanyRecord>
+      try {
+        parsed = JSON.parse(row.data) as Partial<CompanyRecord>
+      } catch {
+        continue
+      }
+      const { record, report } = runAutopilot(withDefaults(parsed), when)
+      if (!report.ran) continue
+      const saved = await saveAgentRecord(db, row.user_id, record, row.updated_at)
+      if (saved) ran += 1
+      else conflicts += 1
+    }
+  }
+  return { checked, ran, conflicts }
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      runScheduledAutopilot(env).then((result) => {
+        console.log('autopilot', JSON.stringify(result))
+      }),
+    )
+  },
+}

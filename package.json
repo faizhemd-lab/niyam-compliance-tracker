@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@clerk/react": "^6.18.8",
     "hono": "^4.13.0",
     "lucide-react": "^1.60.0",
     "motion": "^14.4.0",

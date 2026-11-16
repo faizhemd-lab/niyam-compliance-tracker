@@ -1,0 +1,25 @@
+# Point the agent at your own model server. Ollama, llama.cpp and vLLM all
+# expose an OpenAI-compatible API, so one setting covers all three.
+#
+#   ollama pull qwen2.5:7b
+#   cp .dev.vars.example .dev.vars
+#
+# Without this file the agent still works: it runs its deterministic brain
+# inside the Worker, with the same tools, validation and company record.
+
+MODEL_BASE_URL=http://localhost:11434/v1
+MODEL_NAME=qwen2.5:7b
+
+# Only for a model server behind a token.
+# MODEL_API_KEY=
+
+# Sign-in. Local development may run as one fixed local user, so the app is
+# usable before Clerk keys exist. Never set this on a deployed environment.
+ENVIRONMENT=development
+APP_ORIGIN=http://localhost:5305
+
+# Clerk session-token verification. The publishable key is public, and the
+# Worker derives the instance JWKS from it (CLERK_JWKS_URL overrides that, and
+# CLERK_JWT_KEY verifies against a PEM with no network call). Without one of
+# these the deployed app refuses protected routes instead of letting anyone in.
+# CLERK_PUBLISHABLE_KEY=pk_test_...

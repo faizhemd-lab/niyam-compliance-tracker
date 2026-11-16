@@ -1,12 +1,11 @@
-import { ArrowRight, ArrowUpRight, Check, FileStack, ShieldCheck } from 'lucide-react'
-import { useNavigate } from 'react-router'
+import { ArrowRight, ArrowUpRight, Check, ShieldCheck } from 'lucide-react'
 
-import { DEMO_SCRIPT, FEATURES, JOURNEY, METRICS, PROBLEM, SITE, TRUST } from '../data'
+import { FEATURES, JOURNEY, METRICS, PROBLEM, SITE, TRUST } from '../data'
 import { useDocumentTitle } from '../lib/storage'
-import { useTracker } from '../lib/tracker'
+import { useSession } from '../lib/session'
 import { Header, PageHead, Shell } from '../components/AppShell'
 import { Badge, Reveal } from '../components/Bits'
-import { Button, ButtonLink } from '../components/Button'
+import { ButtonLink } from '../components/Button'
 import { Card } from '../components/Card'
 import { Accordion } from '../components/Content'
 import { Footer } from '../components/Footer'
@@ -30,15 +29,16 @@ const QUESTIONS = [
   },
 ]
 
+const START = [
+  'Create your account and sign in.',
+  'Tell the agent what the business is, in one line.',
+  'Open the calendar the rules engine builds from it.',
+]
+
 export function Home() {
   useDocumentTitle()
-  const navigate = useNavigate()
-  const { loadDemo } = useTracker()
-
-  const startDemo = () => {
-    loadDemo()
-    navigate('/calendar')
-  }
+  const { status } = useSession()
+  const signedIn = status === 'signed-in'
 
   return (
     <Shell>
@@ -57,25 +57,33 @@ export function Home() {
               <span className="block text-violet">government.</span>
             </h1>
             <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-ink-2 sm:text-lg">
-              Tell us about your business in a few minutes. We work out every registration, licence and filing that applies, when it is due, who it is owed to, and what a missed deadline costs — then keep reminding you until it is done.
+              One agent keeps the record of your business on your own server. It works out every registration, licence and filing that applies, when each is due, what a missed deadline costs — drafts the paperwork — and keeps reminding you until it is done.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-2">
-              <ButtonLink to="/interview" variant="violet" size="lg" iconRight={<ArrowRight className="size-4" />}>
-                Check my compliance
-              </ButtonLink>
-              <Button variant="outline" size="lg" onClick={startDemo} icon={<FileStack className="size-4" />}>
-                See a sample calendar
-              </Button>
+              {signedIn ? (
+                <ButtonLink to="/agent" variant="violet" size="lg" iconRight={<ArrowRight className="size-4" />}>
+                  Open the app
+                </ButtonLink>
+              ) : (
+                <>
+                  <ButtonLink to="/signup" variant="violet" size="lg" iconRight={<ArrowRight className="size-4" />}>
+                    Get started
+                  </ButtonLink>
+                  <ButtonLink to="/login" variant="outline" size="lg">
+                    Sign in
+                  </ButtonLink>
+                </>
+              )}
             </div>
           </div>
 
           <div className="rounded-[var(--radius-card-sm)] border border-line bg-soft p-5">
             <div className="flex items-center justify-between">
-              <p className="caps text-muted">A first-time founder</p>
+              <p className="caps text-muted">How it starts</p>
               <Badge tone="violet">3 minutes</Badge>
             </div>
             <ol className="mt-4 space-y-3">
-              {DEMO_SCRIPT.map((line, i) => (
+              {START.map((line, i) => (
                 <li key={line} className="flex gap-3 text-[14px] leading-snug">
                   <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-violet/10 text-[11px] font-medium text-violet tabular-nums">{i + 1}</span>
                   <span className="text-ink-2">{line}</span>
@@ -83,7 +91,7 @@ export function Home() {
               ))}
             </ol>
             <p className="mt-5 border-t border-line pt-4 text-[13px] text-muted">
-              Sample company: a private limited company in Telangana, ₹60 lakh turnover, 12 people, no GST yet.
+              Your record is saved to your account, not to this browser. Nothing is pre-filled for you.
             </p>
           </div>
         </div>
@@ -151,7 +159,7 @@ export function Home() {
         </div>
       </PageHead>
 
-      <PageHead eyebrow="The journey" title="Seven steps, in order" intro="The interview asks fixed questions in a fixed order, so the result is repeatable. Correcting one answer rebuilds the calendar without losing what you have already marked done.">
+      <PageHead eyebrow="The journey" title="Seven steps, in order" intro="The agent keeps one record of the business and the rules read it, so the result is repeatable. Correcting one fact rebuilds the calendar without losing what you have already marked done.">
         <ol className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {JOURNEY.map((step, i) => (
             <li key={step.title} className="border-t border-line pt-4">
@@ -199,11 +207,11 @@ export function Home() {
       <Card as="section" className="mt-2 flex flex-col items-start justify-between gap-6 px-5 py-8 sm:flex-row sm:items-center sm:px-8">
         <div>
           <p className="display text-[clamp(1.6rem,1.2rem+1.6vw,2.4rem)] leading-none">Start with your own business.</p>
-          <p className="mt-2 text-[15px] text-muted">Eight questions, no form numbers, no jargon. Your first calendar is about three minutes away.</p>
+          <p className="mt-2 text-[15px] text-muted">Say what the company is in one line. The agent fills the record, builds the calendar and drafts the first filing.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <ButtonLink to="/interview" variant="violet" iconRight={<ArrowUpRight className="size-4" />}>
-            Check my compliance
+          <ButtonLink to="/agent" variant="violet" iconRight={<ArrowUpRight className="size-4" />}>
+            Talk to the agent
           </ButtonLink>
           <ButtonLink to="/import" variant="outline">
             Import from a spreadsheet

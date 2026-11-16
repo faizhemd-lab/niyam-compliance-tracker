@@ -40,7 +40,7 @@ function MonthBlock({ month, items }: { month: string; items: Deadline[] }) {
 
 export function CalendarPage() {
   useDocumentTitle('Calendar')
-  const { deadlines, summary, state, loadDemo } = useTracker()
+  const { deadlines, summary, state, profile, company } = useTracker()
   const [downloading, setDownloading] = useState(false)
   const dated = deadlines.filter((d) => d.due_date)
   const events = deadlines.filter((d) => !d.due_date)
@@ -57,12 +57,12 @@ export function CalendarPage() {
       const res = await fetch('/api/calendar.ics', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ profile: state.profile, company: state.company, today: state.today }),
+        body: JSON.stringify({ profile, company, today: state.today }),
       })
       if (!res.ok) throw new Error('ics')
       downloadBlob('compliance-calendar.ics', await res.blob())
     } catch {
-      downloadBlob('compliance-calendar.ics', new Blob([toIcs(deadlines, state.company.name || 'My company')], { type: 'text/calendar' }))
+      downloadBlob('compliance-calendar.ics', new Blob([toIcs(deadlines, company.name || 'My company')], { type: 'text/calendar' }))
     }
     setDownloading(false)
   }
@@ -71,19 +71,16 @@ export function CalendarPage() {
     return (
       <Shell>
         <Header />
-        <PageHead eyebrow="Calendar" title="Your deadlines live here" intro="Once the interview is done, every dated obligation lands on this calendar with its authority and penalty." />
+        <PageHead eyebrow="Calendar" title="Your deadlines live here" intro="Every dated obligation the rules find lands here with its authority and penalty, and the agent can explain or draft any of them." />
         <Card className="mt-2">
           <EmptyState
             title="No calendar yet"
-            body="Answer the eight questions, or load the sample company to see a year of deadlines."
+            body="Tell the agent about the business and this page fills with every dated deadline for the next 12 months."
             action={
               <div className="flex flex-wrap justify-center gap-2">
-                <ButtonLink to="/interview" variant="violet">
-                  Check my compliance
+                <ButtonLink to="/agent" variant="violet">
+                  Talk to the agent
                 </ButtonLink>
-                <Button variant="outline" onClick={loadDemo}>
-                  Load the sample company
-                </Button>
               </div>
             }
           />

@@ -1,5 +1,6 @@
 import { DOC_LABELS, GENERATABLE, GROUP_LABELS } from './catalogue'
 import { financialYear, formatDate, formatRupees } from './format'
+import { factValue, type Investor, type Knowledge } from './knowledge'
 import type { ChecklistItem, Company, Deadline, DocKey, GeneratedFile, ObligationGroup } from './types'
 
 /** Which documents the company record already holds. */
@@ -40,7 +41,7 @@ const FOLDER: Record<ObligationGroup, string> = {
   labour: 'Labour',
 }
 
-function folderFor(deadline: Deadline): string {
+export function folderFor(deadline: Deadline): string {
   const fy = financialYear(deadline.due_date ?? new Date().toISOString().slice(0, 10))
   const dir = `${deadline.short.replace(/[^A-Za-z0-9]+/g, '-')}-${deadline.due_date ?? 'event'}`
   return `${fy}/${FOLDER[deadline.group]}/${dir}`
@@ -72,6 +73,65 @@ function directorRows(company: Company) {
   return company.directors
     .map((d) => `<tr><td>${d.name}</td><td>${d.din}</td><td>${d.email ?? '—'}</td><td>${d.mobile ?? '—'}</td></tr>`)
     .join('')
+}
+
+/** The cover sheet every compiled folder carries, built only from known facts. */
+function coverFile(company: Company, deadline: Deadline, today: string, kb?: Knowledge): GeneratedFile {
+  const paidUp = kb ? factValue<number>(kb, 'paid_up_capital') : undefined
+  const authorised = kb ? factValue<number>(kb, 'authorised_capital') : undefined
+  const rows: [string, string | undefined][] = [
+    ['Legal name', company.name || undefined],
+    ['CIN / LLPIN', company.cin],
+    ['PAN', company.pan_masked],
+    ['GSTIN', company.gstin_masked],
+    ['State', company.state],
+    ['Incorporated', company.incorporated_on ? formatDate(company.incorporated_on) : undefined],
+    ['Authorised capital', authorised ? formatRupees(authorised) : undefined],
+    ['Paid-up capital', paidUp ? formatRupees(paidUp) : undefined],
+  ]
+  return {
+    path: `${folderFor(deadline)}/00_Filing-Cover_DRAFT.html`,
+    name: `Filing cover — ${deadline.short}`,
+    media: 'text/html',
+    content: `${header('Filing cover sheet', company, deadline)}
+<table><tbody>${rows.filter(([, v]) => v).map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('')}</tbody></table>
+<h2 style="font-size:1.05rem;margin-top:1.5rem">Why this filing applies</h2>
+<p>${deadline.reason}</p><ul>${deadline.facts.map((f) => `<li>${f.value}</li>`).join('')}</ul>
+<h2 style="font-size:1.05rem;margin-top:1.5rem">If it is missed</h2><p>${deadline.penalty}</p>
+<h2 style="font-size:1.05rem;margin-top:1.5rem">How to file</h2><p>${deadline.how_to_file}</p>
+<p style="font-size:.85rem;color:#555">Compiled ${formatDate(today)} · rule ${deadline.rule_version} · ${deadline.verified ? 'reviewed' : 'not yet verified'}</p>${footer(deadline)}`,
+  }
+}
+
+/** A one-page money summary, for filings that need accounts with them. */
+function financialSummary(company: Company, deadline: Deadline, kb?: Knowledge): GeneratedFile {
+  const capital = kb ? factValue<number>(kb, 'paid_up_capital') : undefined
+  return {
+    path: `${folderFor(deadline)}/02_Financial-Summary_DRAFT.html`,
+    name: 'Financial summary cover',
+    media: 'text/html',
+    content: `${header('Financial summary', company, deadline)}
+<p>This sheet is a cover for the signed financial statements, not a replacement for them. The figures below are what the company record holds.</p>
+<table><tbody>
+<tr><th>Turnover</th><td>${company.turnover !== undefined ? formatRupees(company.turnover) : 'Not on record'}</td></tr>
+<tr><th>Paid-up capital</th><td>${capital !== undefined ? formatRupees(capital) : 'Not on record'}</td></tr>
+<tr><th>Employees on payroll</th><td>${company.employees ?? 'Not on record'}</td></tr>
+<tr><th>GST status</th><td>${company.gst_registered ? 'Registered' : 'Not registered'}</td></tr>
+</tbody></table>
+<p>Attach the audited statements and the auditor’s report before filing.</p>${footer(deadline)}`,
+  }
+}
+
+/** FC-GPR needs the allotment details; draft them from the investor facts. */
+function allotmentFile(company: Company, deadline: Deadline, today: string, kb?: Knowledge): GeneratedFile {
+  const investors = (kb ? factValue<Investor[]>(kb, 'investors') : undefined) ?? []
+  const rows = investors.map((i) => `${i.name},${i.country},${i.amount ?? ''},${i.allotted_on ?? ''}`).join('\n')
+  return {
+    path: `${folderFor(deadline)}/01_Share-Allotment_DRAFT.csv`,
+    name: 'Share allotment data (FC-GPR)',
+    media: 'text/csv',
+    content: `# ${DRAFT} — ${company.name} — generated ${today} — rule ${deadline.rule_version}\ninvestor,country,amount_inr,allotted_on\n${rows || '# add investor name, country, amount and allotment date\n'}`,
+  }
 }
 
 function template(key: DocKey, company: Company, deadline: Deadline, today: string): GeneratedFile | null {
@@ -142,12 +202,16 @@ export function compileDeadline(
   deadline: Deadline,
   today: string,
   ticked: DocKey[] = [],
+  knowledge?: Knowledge,
 ): { files: GeneratedFile[]; missing: string[]; folder: string } {
   const missing: string[] = []
   if (!company.name) missing.push('Company name')
   if (!company.directors?.length) missing.push('Director or partner details')
 
-  const files: GeneratedFile[] = []
+  const files: GeneratedFile[] = [coverFile(company, deadline, today, knowledge)]
+  if (deadline.documents.includes('financial_statements')) files.push(financialSummary(company, deadline, knowledge))
+  if (deadline.documents.includes('share_allotment_details')) files.push(allotmentFile(company, deadline, today, knowledge))
+
   for (const key of deadline.documents) {
     if (!GENERATABLE.includes(key)) continue
     const file = template(key, company, deadline, today)
