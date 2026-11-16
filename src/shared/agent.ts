@@ -2,7 +2,7 @@ import { deadlinesFor, runAutopilot } from './autopilot'
 import { DOC_LABELS } from './catalogue'
 import { checklistFor, compileDeadline } from './documents'
 import { addDays, formatDate, plural } from './format'
-import { BRAIN_STATUS, engineFor, engineStatus, type Engine, type ModelEnv, type ModelStatus, type ToolSpec, type Turn } from './engines'
+import { BRAIN_STATUS, enginesFor, engineStatus, type Engine, type ModelEnv, type ModelStatus, type ToolSpec, type Turn } from './engines'
 import { explain, maskIdentifiers } from './gateway'
 import { checkGrounding } from './grounding'
 import {
@@ -738,17 +738,30 @@ function logTurn(entry: Record<string, unknown>) {
  * grounded in what the tools returned. Any failure lands on the deterministic
  * brain or on a code-written summary, never on an unchecked answer.
  */
-export async function runAgent(input: AgentInput, env: ModelEnv, engine: Engine | null = engineFor(env)): Promise<AgentReply> {
+export async function runAgent(input: AgentInput, env: ModelEnv, engines: Engine | Engine[] | null = enginesFor(env)): Promise<AgentReply> {
   const started = Date.now()
-  if (!engine) {
+  const candidates = engines === null ? [] : Array.isArray(engines) ? engines : [engines]
+  if (!candidates.length) {
     const reply = { ...localBrain(input), fallback: 'no_engine' as const }
     logTurn({ engine: 'brain', ms: Date.now() - started, fallback: reply.fallback, tools: reply.calls.map((c) => c.name) })
     return reply
   }
-  const status = await engine.status()
-  if (!status.connected) {
-    const reply = { ...localBrain(input), model: status, fallback: 'engine_down' as const }
-    logTurn({ engine: engine.id, ms: Date.now() - started, fallback: reply.fallback, tools: reply.calls.map((c) => c.name) })
+  // The first reachable engine drives the turn: a company's own model, then Claude.
+  let engine: Engine | undefined
+  let status: ModelStatus | undefined
+  let firstStatus: ModelStatus | undefined
+  for (const candidate of candidates) {
+    const s = await candidate.status()
+    firstStatus ??= s
+    if (s.connected) {
+      engine = candidate
+      status = s
+      break
+    }
+  }
+  if (!engine || !status) {
+    const reply = { ...localBrain(input), model: firstStatus ?? BRAIN_STATUS, fallback: 'engine_down' as const }
+    logTurn({ engine: candidates.map((c) => c.id).join('>'), ms: Date.now() - started, fallback: reply.fallback, tools: reply.calls.map((c) => c.name) })
     return reply
   }
 
@@ -778,7 +791,7 @@ export async function runAgent(input: AgentInput, env: ModelEnv, engine: Engine 
       reply = result.text.trim()
       break
     }
-    turns.push({ role: 'assistant', text: result.text ?? '', toolCalls: result.toolCalls })
+    turns.push({ role: 'assistant', text: result.text ?? '', toolCalls: result.toolCalls, raw: result.raw })
     result.toolCalls.forEach((c, index) => {
       let output: string
       if (index >= LIMITS.callsPerStep || totalCalls >= LIMITS.callsPerTurn) {

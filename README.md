@@ -96,16 +96,34 @@ never marks anything done, shares anything or changes a fact. It is
 deterministic, so it behaves the same with or without a model server. "Run the
 morning check now" on the Agent page runs it on demand (`POST /api/agent/autopilot`).
 
-### Two engines, one contract
+### Engines, one contract
 
-1. **Self-hosted model.** Set `MODEL_BASE_URL` (and `MODEL_NAME`) to an
+The agent loop (`runAgent` in `agent.ts`) talks to one engine interface
+(`src/shared/engines.ts`). Every engine drives the same tools, validation,
+approvals and grounding check; the first reachable one in this order answers:
+
+1. **A self-hosted model.** Set `MODEL_BASE_URL` (and `MODEL_NAME`) to an
    OpenAI-compatible server on your own hardware. Ollama, llama.cpp and vLLM all
-   qualify. The agent sends the masked question plus tool schemas, executes the
-   tool calls it gets back, feeds the results in, and answers — at most six
-   model steps. Pick a model with tool calling (qwen2.5 7B or larger works best). `POST /api/agent/message` returns which engine answered.
-2. **On-server brain.** With no model configured or reachable, a deterministic
+   qualify. Pick a model with tool calling (qwen2.5 7B or larger works best).
+2. **Claude (the hosted default).** Set the Worker secret `ANTHROPIC_API_KEY`.
+   `src/shared/claude.ts` calls `claude-opus-5-5` through Anthropic's official
+   SDK with adaptive thinking (effort `medium`, override with `CLAUDE_EFFORT`;
+   model override `CLAUDE_MODEL`), the stable prompt cached, thinking blocks
+   passed back unchanged within a turn, and server-side refusal fallbacks
+   (`fallbacks: "default"`). Identifiers are masked before anything is sent;
+   the rest of the record and the conversation go to Anthropic to answer.
+3. **On-server brain.** With no engine configured or reachable, a deterministic
    brain in the Worker performs the same extraction, validation and tools. The
    app stays usable; the chat header says which engine is running.
+
+Turn on Claude for the live site (the key never goes in the code, the repo or
+the browser):
+
+```sh
+npx wrangler secret put ANTHROPIC_API_KEY   # paste the key when prompted
+```
+
+`GET /api/agent/status` then reports `"engine": "Claude", "connected": true`.
 
 ```sh
 # optional: run a real local model

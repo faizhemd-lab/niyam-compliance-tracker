@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "1.4.0",
     "@clerk/react": "^6.18.8",
     "hono": "^4.13.0",
     "lucide-react": "^1.60.0",

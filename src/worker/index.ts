@@ -40,6 +40,10 @@ type Env = {
   MODEL_BASE_URL?: string
   MODEL_NAME?: string
   MODEL_API_KEY?: string
+  /** Worker secret for the hosted Claude engine (wrangler secret put ANTHROPIC_API_KEY). */
+  ANTHROPIC_API_KEY?: string
+  CLAUDE_MODEL?: string
+  CLAUDE_EFFORT?: string
 }
 
 type AppEnv = { Bindings: Env }

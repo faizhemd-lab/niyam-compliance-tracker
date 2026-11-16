@@ -1,3 +1,5 @@
+import { claudeEngine } from './claude'
+
 /**
  * Model engines for the agent.
  *
@@ -7,7 +9,7 @@
  *
  * - `openAICompatibleEngine`: any server with an OpenAI-compatible chat API
  *   (Ollama, llama.cpp, vLLM), including a company's own model.
- * - a Claude engine (added separately) for the hosted default.
+ * - `claudeEngine` (claude.ts): the hosted default.
  * - when no engine is configured or reachable, the agent's deterministic brain
  *   answers instead (see agent.ts).
  */
@@ -19,7 +21,13 @@ export type ToolCall = { id: string; name: string; args: Record<string, unknown>
 /** One entry of the conversation, independent of any provider's format. */
 export type Turn =
   | { role: 'user'; text: string }
-  | { role: 'assistant'; text: string; toolCalls?: ToolCall[] }
+  | {
+      role: 'assistant'
+      text: string
+      toolCalls?: ToolCall[]
+      /** The engine's own content for this step (e.g. thinking blocks), sent back unchanged within the turn. */
+      raw?: unknown
+    }
   | { role: 'tool'; callId: string; name: string; output: string }
 
 export type EngineRequest = {
@@ -30,7 +38,7 @@ export type EngineRequest = {
 }
 
 /** What one model step produced: text, tool calls, or both. */
-export type EngineStep = { text: string; toolCalls: ToolCall[] }
+export type EngineStep = { text: string; toolCalls: ToolCall[]; raw?: unknown }
 
 export type ModelStatus = {
   configured: boolean
@@ -49,7 +57,16 @@ export interface Engine {
   step(request: EngineRequest): Promise<EngineStep | null>
 }
 
-export type ModelEnv = { MODEL_BASE_URL?: string; MODEL_NAME?: string; MODEL_API_KEY?: string }
+export type ModelEnv = {
+  /** A self-hosted OpenAI-compatible server for this deployment. */
+  MODEL_BASE_URL?: string
+  MODEL_NAME?: string
+  MODEL_API_KEY?: string
+  /** The hosted default. A Worker secret; never sent to the browser. */
+  ANTHROPIC_API_KEY?: string
+  CLAUDE_MODEL?: string
+  CLAUDE_EFFORT?: string
+}
 
 export const BRAIN_STATUS: ModelStatus = { configured: false, connected: false, engine: 'on-server deterministic brain' }
 
@@ -66,7 +83,7 @@ export function clearEngineStatusCache() {
   statusCache.clear()
 }
 
-async function cachedStatus(key: string, check: () => Promise<ModelStatus>): Promise<ModelStatus> {
+export async function cachedStatus(key: string, check: () => Promise<ModelStatus>): Promise<ModelStatus> {
   const hit = statusCache.get(key)
   const now = Date.now()
   if (hit && now - hit.at < (hit.status.connected ? STATUS_TTL_OK : STATUS_TTL_DOWN)) return hit.status
@@ -75,16 +92,36 @@ async function cachedStatus(key: string, check: () => Promise<ModelStatus>): Pro
   return status
 }
 
-/** Pick the engine this deployment is configured for, or null for the brain. */
-export function engineFor(env: ModelEnv): Engine | null {
+/**
+ * Every engine this deployment is configured for, in the order they are tried:
+ * a self-hosted model first, then Claude. The agent uses the first one that is
+ * reachable; with none, the deterministic brain answers.
+ */
+export function enginesFor(env: ModelEnv): Engine[] {
+  const engines: Engine[] = []
   const baseUrl = env.MODEL_BASE_URL?.trim().replace(/\/$/, '')
-  if (baseUrl) return openAICompatibleEngine({ baseUrl, model: env.MODEL_NAME, apiKey: env.MODEL_API_KEY })
-  return null
+  if (baseUrl) engines.push(openAICompatibleEngine({ baseUrl, model: env.MODEL_NAME, apiKey: env.MODEL_API_KEY }))
+  const key = env.ANTHROPIC_API_KEY?.trim()
+  if (key) engines.push(claudeEngine({ apiKey: key, model: env.CLAUDE_MODEL, effort: env.CLAUDE_EFFORT }))
+  return engines
 }
 
+/** The first configured engine, or null when the brain answers. */
+export function engineFor(env: ModelEnv): Engine | null {
+  return enginesFor(env)[0] ?? null
+}
+
+/** The status of the engine that would answer now: the first reachable one, else the first configured one. */
 export async function engineStatus(env: ModelEnv): Promise<ModelStatus> {
-  const engine = engineFor(env)
-  return engine ? engine.status() : BRAIN_STATUS
+  const engines = enginesFor(env)
+  if (!engines.length) return BRAIN_STATUS
+  let first: ModelStatus | undefined
+  for (const engine of engines) {
+    const status = await engine.status()
+    if (status.connected) return status
+    first ??= status
+  }
+  return first!
 }
 
 // ---------------------------------------------------------------------------
