@@ -25,7 +25,6 @@ Impact Hub, Hyderabad, 14 November 2026.
 | Reminders | `/reminders` | Simulated clock, the daily job, the idempotent delivery log, WhatsApp preview |
 | Share | `/share` | Hashed share links, permissions, expiry, revocation, activity log |
 | CA view | `/s/:token` | The accountant’s scoped, read-mostly view |
-| Find a CA | `/ca` | Weighted matching with reasons and a score breakdown |
 | Import | `/import` | CSV upload, header detection, mapping preview, validated import |
 | Company | `/company` | Correct any answer; the rules engine re-runs safely |
 

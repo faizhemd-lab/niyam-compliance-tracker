@@ -1,6 +1,5 @@
 import { Check, Copy, Eye, Link2, ShieldCheck, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { Link } from 'react-router'
 
 import { useDocumentTitle } from '../lib/storage'
 import { newId, useTracker } from '../lib/tracker'
@@ -235,9 +234,6 @@ export function SharePage() {
             <h2 className="text-[16px] font-medium tracking-[-0.02em]">Activity log</h2>
             <p className="mt-1 text-[13px] text-muted">Profile changes, shares, downloads and every CA action.</p>
           </div>
-          <Link to="/ca" className="caps text-violet hov:text-violet-deep">
-            No CA yet? Match one
-          </Link>
         </div>
         {!state.activity.length ? (
           <p className="mt-4 text-[13.5px] text-muted">Nothing yet. The log starts with the first change.</p>

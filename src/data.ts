@@ -14,7 +14,6 @@ export const NAV = [
   { to: '/calendar', label: 'Calendar' },
   { to: '/documents', label: 'Documents' },
   { to: '/reminders', label: 'Reminders' },
-  { to: '/ca', label: 'Find a CA' },
   { to: '/share', label: 'Share' },
 ]
 

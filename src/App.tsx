@@ -4,7 +4,6 @@ import { BrowserRouter, Route, Routes, useLocation } from 'react-router'
 
 import { ToastProvider } from './components/Overlay'
 import { TrackerProvider } from './lib/tracker'
-import { CaMatch } from './pages/CaMatch'
 import { CalendarPage } from './pages/Calendar'
 import { CompanyPage } from './pages/Company'
 import { DeadlinePage } from './pages/Deadline'
@@ -54,7 +53,6 @@ function Pages() {
         <Route path="reminders" element={<Reminders />} />
         <Route path="share" element={<SharePage />} />
         <Route path="s/:token" element={<ShareView />} />
-        <Route path="ca" element={<CaMatch />} />
         <Route path="import" element={<ImportPage />} />
         <Route path="company" element={<CompanyPage />} />
         <Route path="*" element={<NotFound />} />

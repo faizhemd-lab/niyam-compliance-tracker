@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowUpRight, Check, CircleHelp, Download, FileCheck2, Play, Share2, Sparkles, Undo2 } from 'lucide-react'
+import { ArrowLeft, Check, CircleHelp, Download, FileCheck2, Play, Share2, Sparkles, Undo2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 
@@ -373,9 +373,6 @@ export function DeadlinePage() {
             <p className="mt-3 text-[12px] leading-snug text-muted">
               Rules are versioned data. A reviewer signs each one off with a source link; until then it shows as not yet verified.
             </p>
-            <ButtonLink to="/ca" variant="outline" size="sm" className="mt-4" iconRight={<ArrowUpRight className="size-4" />}>
-              Ask a CA about this
-            </ButtonLink>
           </Card>
 
           <Card as="section" className="px-5 py-6">
