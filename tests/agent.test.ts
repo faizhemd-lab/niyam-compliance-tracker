@@ -345,7 +345,7 @@ describe('the OpenAI-compatible engine', () => {
         }
         bodies.push(String(init?.body))
         const next = completions.shift()
-        return next === 500 ? new Response('boom', { status: 500 }) : new Response(JSON.stringify(next), { status: 200 })
+        return typeof next === 'number' ? new Response('error', { status: next }) : new Response(JSON.stringify(next), { status: 200 })
       }),
     )
     return { bodies, modelChecks: () => modelChecks }
@@ -378,6 +378,24 @@ describe('the OpenAI-compatible engine', () => {
     const second = JSON.parse(server.bodies[1])
     expect(second.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'x1' })
     expect(result.reply).toBe('Here is the calendar.')
+  })
+
+  it('sends tool calls back exactly as received, including fields like Gemini thought signatures', async () => {
+    const signed = { id: 'g1', type: 'function', function: { name: 'list_shares', arguments: '{}' }, extra_content: { google: { thought_signature: 'sig-xyz' } } }
+    const server = stubServer([answer('', [signed]), answer('No links yet.')])
+    const result = await runAgent(input('any share links?'), env)
+    expect(result.reply).toBe('No links yet.')
+    const second = JSON.parse(server.bodies[1])
+    expect(second.messages.at(-2)).toEqual({ role: 'assistant', content: null, tool_calls: [signed] })
+  })
+
+  it('backs off briefly when the server is rate limited, instead of failing every turn', async () => {
+    const server = stubServer([429])
+    const first = await runAgent(input('hi'), env)
+    const second = await runAgent(input('hi'), env)
+    expect(first.fallback).toBe('engine_failed')
+    expect(second.fallback).toBe('engine_down')
+    expect(server.bodies).toHaveLength(1)
   })
 
   it('treats a server error as a failed step', async () => {

@@ -157,11 +157,22 @@ function toOpenAIMessages(request: EngineRequest): OpenAIMessage[] {
         // Some servers reject an empty string next to tool calls; null is the standard form.
         content: turn.toolCalls?.length && !turn.text ? null : turn.text,
         ...(turn.toolCalls?.length
-          ? { tool_calls: turn.toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })) }
+          ? {
+              // Tool calls go back exactly as the server sent them when we have them: some servers attach
+              // fields they require on the next request (Gemini's thought signatures in `extra_content`).
+              tool_calls: rawOpenAIToolCalls(turn.raw) ?? turn.toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })),
+            }
           : {}),
       })
   }
   return out
+}
+
+/** The raw tool calls an OpenAI-compatible server returned, stored on the assistant turn. */
+type OpenAIRaw = { openai_tool_calls: unknown[] }
+
+function rawOpenAIToolCalls(raw: unknown): unknown[] | undefined {
+  return raw && typeof raw === 'object' && Array.isArray((raw as OpenAIRaw).openai_tool_calls) ? (raw as OpenAIRaw).openai_tool_calls : undefined
 }
 
 /** Tool arguments arrive as a JSON string, an object, or garbage. */
@@ -180,12 +191,13 @@ export function parseToolArgs(raw: unknown): Record<string, unknown> {
 export function openAICompatibleEngine(config: { baseUrl: string; model?: string; apiKey?: string }): Engine {
   const baseUrl = config.baseUrl.replace(/\/$/, '')
   const auth: Record<string, string> = config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}
+  const statusKey = `openai:${baseUrl}:${config.model ?? ''}`
 
   return {
     id: 'openai_compatible',
 
     status: () =>
-      cachedStatus(`openai:${baseUrl}:${config.model ?? ''}`, async () => {
+      cachedStatus(statusKey, async () => {
         try {
           const res = await fetch(`${baseUrl}/models`, { headers: auth, signal: AbortSignal.timeout(STATUS_TIMEOUT) })
           if (!res.ok) return { configured: true, connected: false, engine: 'self-hosted model', model: config.model, detail: `The model server answered ${res.status}.` }
@@ -214,19 +226,30 @@ export function openAICompatibleEngine(config: { baseUrl: string; model?: string
             tools: request.tools.map((t) => ({ type: 'function', function: t })),
             tool_choice: 'auto',
             temperature: 0.2,
-            max_tokens: 800,
+            // Room for models that think before answering; thinking counts toward this on some servers.
+            max_tokens: 2048,
           }),
           signal: AbortSignal.timeout(STEP_TIMEOUT),
         })
-        if (!res.ok) return null
+        if (!res.ok) {
+          // Rate limited or overloaded: skip this engine briefly instead of failing every turn.
+          if (res.status === 429 || res.status === 503) {
+            const wait = Number(res.headers.get('retry-after'))
+            markEngineDown(statusKey, { configured: true, connected: false, engine: 'self-hosted model', model: config.model, detail: res.status === 429 ? 'The model server is rate limiting requests.' : 'The model server is overloaded.' }, Date.now() + (Number.isFinite(wait) && wait > 0 ? Math.min(wait, 300) : 30) * 1000)
+          }
+          console.log(JSON.stringify({ event: 'model_error', engine: 'openai_compatible', status: res.status }))
+          return null
+        }
         const body = (await res.json()) as {
           choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: unknown } }[] } }[]
         }
         const message = body.choices?.[0]?.message
         if (!message) return null
+        const calls = message.tool_calls ?? []
         return {
           text: message.content ?? '',
-          toolCalls: (message.tool_calls ?? []).map((c, index) => ({ id: c.id ?? `call-${index}`, name: c.function?.name ?? '', args: parseToolArgs(c.function?.arguments) })),
+          toolCalls: calls.map((c, index) => ({ id: c.id ?? `call-${index}`, name: c.function?.name ?? '', args: parseToolArgs(c.function?.arguments) })),
+          ...(calls.length ? { raw: { openai_tool_calls: calls } satisfies OpenAIRaw } : {}),
         }
       } catch {
         return null
