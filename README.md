@@ -102,9 +102,14 @@ The agent loop (`runAgent` in `agent.ts`) talks to one engine interface
 (`src/shared/engines.ts`). Every engine drives the same tools, validation,
 approvals and grounding check; the first reachable one in this order answers:
 
-1. **A self-hosted model.** Set `MODEL_BASE_URL` (and `MODEL_NAME`) to an
-   OpenAI-compatible server on your own hardware. Ollama, llama.cpp and vLLM all
-   qualify. Pick a model with tool calling (qwen2.5 7B or larger works best).
+1. **An OpenAI-compatible model server.** Set `MODEL_BASE_URL` (and
+   `MODEL_NAME`) to a server on your own hardware (Ollama, llama.cpp, vLLM) or a
+   hosted one. **The live site uses Gemini 3.5 Flash on Google AI Studio's free
+   tier** (`wrangler.jsonc`), with the key as the `MODEL_API_KEY` secret. Tool
+   calls are sent back exactly as received, which Gemini needs for its thought
+   signatures; on 429/503 the engine is skipped briefly and the next engine or
+   the brain answers. Note Google's free-tier terms on data use and its rate
+   limits, which every user of the site shares.
 2. **Claude (the hosted default).** Set the Worker secret `ANTHROPIC_API_KEY`.
    `src/shared/claude.ts` calls `claude-opus-5-5` through Anthropic's official
    SDK with adaptive thinking (effort `medium`, override with `CLAUDE_EFFORT`;

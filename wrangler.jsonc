@@ -23,7 +23,12 @@
   // the Worker derives the Clerk JWKS from it. Local `.dev.vars` overrides these.
   "vars": {
     "CLERK_PUBLISHABLE_KEY": "pk_test_Y2FsbS1jcmF5ZmlzaC00MzU2LmNsZXJrLmFjY291bnRzLmRldiQ",
-    "APP_ORIGIN": "https://niyam.niyam-compliance-tracker.workers.dev"
+    "APP_ORIGIN": "https://niyam.niyam-compliance-tracker.workers.dev",
+    // The agent's model: Gemini through Google AI Studio's OpenAI-compatible
+    // endpoint (free tier). The key is a secret, never in this file:
+    //   npx wrangler secret put MODEL_API_KEY
+    "MODEL_BASE_URL": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "MODEL_NAME": "gemini-3.5-flash"
   },
   // The agent's autopilot: every day at 03:30 UTC (09:00 IST).
   "triggers": { "crons": ["30 3 * * *"] },
