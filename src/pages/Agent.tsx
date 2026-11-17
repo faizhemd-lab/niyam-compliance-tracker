@@ -178,7 +178,7 @@ export function Agent() {
               </span>
               <div>
                 <p className="text-[14px] font-medium leading-tight">Compliance agent</p>
-                <p className="text-[12px] text-muted">{model?.connected ? 'Self-hosted model · tool calls · validated writes' : 'On-server brain · no external model'}</p>
+                <p className="text-[12px] text-muted">{model?.connected ? `${model.engine} · tool calls · validated writes` : 'On-server brain · no external model'}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -385,7 +385,7 @@ export function Agent() {
           <Card as="section" className="px-5 py-5">
             <div className="flex items-center gap-2">
               <Cpu className="size-4 text-violet" aria-hidden />
-              <h2 className="text-[15px] font-medium">Runs on this server</h2>
+              <h2 className="text-[15px] font-medium">Agent engine</h2>
             </div>
             <dl className="mt-2 divide-y divide-line text-[12.5px]">
               <div className="flex justify-between gap-3 py-1.5">
@@ -397,15 +397,19 @@ export function Agent() {
                 <dd className="text-right font-medium">{model?.model ?? 'none configured'}</dd>
               </div>
               <div className="flex justify-between gap-3 py-1.5">
-                <dt className="text-muted">Outbound calls</dt>
-                <dd className="text-right font-medium">{model?.connected ? 'to your model server only' : 'none'}</dd>
+                <dt className="text-muted">Company data sent to</dt>
+                <dd className="text-right font-medium">
+                  {!model?.connected ? 'nobody' : model.hosted ? model.provider ?? 'the model provider' : 'your own model server'}
+                </dd>
               </div>
             </dl>
             {model?.detail && <p className="mt-2 text-[11.5px] text-[#8a5207]">{model.detail}</p>}
             <p className="mt-3 text-[12px] leading-relaxed text-muted">
-              {model?.connected
-                ? 'The model runs on your hardware and the app talks to it over the local network. PAN, GSTIN, phone and email are masked before the prompt is built.'
-                : 'No model server is configured, so the agent runs its deterministic brain in the Worker: the same tools, validation and record, just no language model. Point MODEL_BASE_URL at Ollama or vLLM to switch.'}
+              {!model?.connected
+                ? 'No model is reachable, so the agent runs its deterministic brain in this app’s server: the same tools, validation and record, without a language model. Nothing is sent anywhere.'
+                : model.hosted
+                  ? `The agent runs in this app’s server and asks ${model.provider ?? 'the provider'}’s model to choose tools and word replies. PAN, GSTIN, phone and email are masked first; the rest of the company record and this conversation are sent to ${model.provider ?? 'the provider'} to answer. Dates, penalties and what applies always come from the rules engine, and every reply is checked against them.`
+                  : 'The model runs on your own server, so company data stays with you. PAN, GSTIN, phone and email are masked before anything is sent to it.'}
             </p>
             {!model?.connected && (
               <pre className="mt-3 overflow-x-auto rounded-[var(--radius-xs)] bg-night p-3 text-[11px] leading-relaxed text-white/85">{`# .dev.vars

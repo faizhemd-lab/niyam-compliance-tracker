@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { datesMentioned, LIMITS, runAgent, type AgentInput } from '../src/shared/agent'
-import { clearEngineStatusCache, engineFor, openAICompatibleEngine, type Engine, type EngineRequest, type EngineStep, type ModelStatus } from '../src/shared/engines'
+import { clearEngineStatusCache, describeServer, engineFor, engineStatus, openAICompatibleEngine, type Engine, type EngineRequest, type EngineStep, type ModelStatus } from '../src/shared/engines'
 import { checkGrounding, numbersIn } from '../src/shared/grounding'
 import { applyFacts } from '../src/shared/knowledge'
 import { emptyRecord, type CompanyRecord } from '../src/shared/record'
@@ -352,6 +352,22 @@ describe('the OpenAI-compatible engine', () => {
   }
 
   const answer = (content: string, tool_calls?: unknown[]) => ({ choices: [{ message: { content, tool_calls } }] })
+
+  it.each([
+    ['https://generativelanguage.googleapis.com/v1beta/openai', undefined, { engine: 'Gemini', hosted: true, provider: 'Google' }],
+    ['http://localhost:11434/v1', undefined, { engine: 'self-hosted model', hosted: false }],
+    ['http://192.168.1.20:8000/v1', undefined, { engine: 'self-hosted model', hosted: false }],
+    ['http://ollama.internal/v1', 'Our Llama', { engine: 'Our Llama', hosted: false }],
+    ['https://llm.example.com/v1', undefined, { engine: 'model server', hosted: true, provider: 'llm.example.com' }],
+  ] as const)('describes %s honestly', (url, label, expected) => {
+    expect(describeServer(url, label)).toEqual(expected)
+  })
+
+  it('reports a hosted provider in the status the Agent page shows', async () => {
+    stubServer([answer('Hi.')])
+    const status = await engineStatus({ MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai', MODEL_NAME: 'gemini-3.5-flash', MODEL_API_KEY: 'k' })
+    expect(status).toMatchObject({ connected: true, engine: 'Gemini', hosted: true, provider: 'Google', model: 'gemini-3.5-flash' })
+  })
 
   it('is chosen from MODEL_BASE_URL, and not without it', () => {
     expect(engineFor(env)?.id).toBe('openai_compatible')

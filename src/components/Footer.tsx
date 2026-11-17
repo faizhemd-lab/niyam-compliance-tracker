@@ -33,7 +33,7 @@ export function Footer() {
             <ul className="space-y-2 text-sm text-night-muted">
               <li>22 rules in the catalogue, version 2026.1</li>
               <li>Rules engine, reminder job and compiler run on the server</li>
-              <li>Agent runs on your server · identifiers masked before any model call</li>
+              <li>Identifiers masked before any model call · every reply checked</li>
               <li>
                 <a href={`mailto:${SITE.email}`} className="inline-flex min-h-10 items-center text-white hov:text-violet-light">
                   {SITE.email}

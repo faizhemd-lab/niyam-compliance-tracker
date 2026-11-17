@@ -72,14 +72,14 @@ export function claudeEngine(config: ClaudeConfig): Engine {
       cachedStatus(`claude:${model}`, async (): Promise<ModelStatus> => {
         try {
           await client.models.retrieve(model)
-          return { configured: true, connected: true, engine: 'Claude', model }
+          return { configured: true, connected: true, engine: 'Claude', hosted: true, provider: 'Anthropic', model }
         } catch (error) {
           let detail = 'Claude is unreachable.'
           if (error instanceof Anthropic.AuthenticationError) detail = 'The Anthropic API key was rejected.'
           else if (error instanceof Anthropic.NotFoundError) detail = `The model ${model} is not available to this key.`
           else if (error instanceof Anthropic.RateLimitError) detail = 'Claude is rate limited right now.'
           else if (error instanceof Anthropic.APIError) detail = `Claude answered ${error.status}.`
-          return { configured: true, connected: false, engine: 'Claude', model, detail }
+          return { configured: true, connected: false, engine: 'Claude', hosted: true, provider: 'Anthropic', model, detail }
         }
       }),
 

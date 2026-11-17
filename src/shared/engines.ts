@@ -45,10 +45,15 @@ export type EngineStep = { text: string; toolCalls: ToolCall[]; raw?: unknown }
 export type ModelStatus = {
   configured: boolean
   connected: boolean
+  /** What the founder sees: "Gemini", "Claude", "self-hosted model"... */
   engine: string
   model?: string
   models?: string[]
   detail?: string
+  /** True when the model runs at a third party, so company data leaves this app. */
+  hosted?: boolean
+  /** Who runs it, when hosted: "Google", "Anthropic", "Cloudflare", or a host name. */
+  provider?: string
 }
 
 export interface Engine {
@@ -64,6 +69,8 @@ export type ModelEnv = {
   MODEL_BASE_URL?: string
   MODEL_NAME?: string
   MODEL_API_KEY?: string
+  /** Optional display name for that server, e.g. "Our Llama server". */
+  MODEL_LABEL?: string
   /** The hosted default. A Worker secret; never sent to the browser. */
   ANTHROPIC_API_KEY?: string
   CLAUDE_MODEL?: string
@@ -76,7 +83,7 @@ export type ModelEnv = {
 /** The part of the Workers AI binding the engine uses. */
 export type AiBinding = { run(model: string, inputs: Record<string, unknown>): Promise<unknown> }
 
-export const BRAIN_STATUS: ModelStatus = { configured: false, connected: false, engine: 'on-server deterministic brain' }
+export const BRAIN_STATUS: ModelStatus = { configured: false, connected: false, engine: 'on-server deterministic brain', hosted: false }
 
 const STEP_TIMEOUT = 25_000
 const STATUS_TIMEOUT = 2_000
@@ -116,7 +123,7 @@ export function markEngineDown(key: string, status: ModelStatus, until: number) 
 export function enginesFor(env: ModelEnv): Engine[] {
   const engines: Engine[] = []
   const baseUrl = env.MODEL_BASE_URL?.trim().replace(/\/$/, '')
-  if (baseUrl) engines.push(openAICompatibleEngine({ baseUrl, model: env.MODEL_NAME, apiKey: env.MODEL_API_KEY }))
+  if (baseUrl) engines.push(openAICompatibleEngine({ baseUrl, model: env.MODEL_NAME, apiKey: env.MODEL_API_KEY, label: env.MODEL_LABEL }))
   const key = env.ANTHROPIC_API_KEY?.trim()
   if (key) engines.push(claudeEngine({ apiKey: key, model: env.CLAUDE_MODEL, effort: env.CLAUDE_EFFORT }))
   if (env.AI) engines.push(workersAIEngine(env.AI, env.WORKERS_AI_MODEL))
@@ -188,8 +195,40 @@ export function parseToolArgs(raw: unknown): Record<string, unknown> {
   }
 }
 
-export function openAICompatibleEngine(config: { baseUrl: string; model?: string; apiKey?: string }): Engine {
+/**
+ * Who runs an OpenAI-compatible server, from its address. Private and local
+ * addresses are the company's own; anything else is a third party, and the
+ * Agent page says so.
+ */
+export function describeServer(baseUrl: string, label?: string): Pick<ModelStatus, 'engine' | 'hosted' | 'provider'> {
+  let host = ''
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase()
+  } catch {
+    // An unparseable URL fails its status check anyway.
+  }
+  const own =
+    host === 'localhost' ||
+    host === '[::1]' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    /^(127|10)\.\d+\.\d+\.\d+$/.test(host) ||
+    /^192\.168\.\d+\.\d+$/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(host)
+  const known: Record<string, { engine: string; provider: string }> = {
+    'generativelanguage.googleapis.com': { engine: 'Gemini', provider: 'Google' },
+    'api.groq.com': { engine: 'Groq', provider: 'Groq' },
+    'openrouter.ai': { engine: 'OpenRouter', provider: 'OpenRouter' },
+    'api.openai.com': { engine: 'OpenAI', provider: 'OpenAI' },
+  }
+  const match = known[host]
+  if (own) return { engine: label?.trim() || 'self-hosted model', hosted: false }
+  return { engine: label?.trim() || match?.engine || 'model server', hosted: true, provider: match?.provider ?? host }
+}
+
+export function openAICompatibleEngine(config: { baseUrl: string; model?: string; apiKey?: string; label?: string }): Engine {
   const baseUrl = config.baseUrl.replace(/\/$/, '')
+  const who = describeServer(baseUrl, config.label)
   const auth: Record<string, string> = config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}
   const statusKey = `openai:${baseUrl}:${config.model ?? ''}`
 
@@ -200,15 +239,15 @@ export function openAICompatibleEngine(config: { baseUrl: string; model?: string
       cachedStatus(statusKey, async () => {
         try {
           const res = await fetch(`${baseUrl}/models`, { headers: auth, signal: AbortSignal.timeout(STATUS_TIMEOUT) })
-          if (!res.ok) return { configured: true, connected: false, engine: 'self-hosted model', model: config.model, detail: `The model server answered ${res.status}.` }
+          if (!res.ok) return { configured: true, connected: false, ...who, model: config.model, detail: `The model server answered ${res.status}.` }
           const body = (await res.json()) as { data?: { id?: string }[] }
           const models = (body.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id))
-          return { configured: true, connected: true, engine: 'self-hosted model', model: config.model ?? models[0], models }
+          return { configured: true, connected: true, ...who, model: config.model ?? models[0], models }
         } catch (error) {
           return {
             configured: true,
             connected: false,
-            engine: 'self-hosted model',
+            ...who,
             model: config.model,
             detail: error instanceof Error ? error.message.slice(0, 160) : 'The model server is unreachable.',
           }
@@ -235,7 +274,7 @@ export function openAICompatibleEngine(config: { baseUrl: string; model?: string
           // Rate limited or overloaded: skip this engine briefly instead of failing every turn.
           if (res.status === 429 || res.status === 503) {
             const wait = Number(res.headers.get('retry-after'))
-            markEngineDown(statusKey, { configured: true, connected: false, engine: 'self-hosted model', model: config.model, detail: res.status === 429 ? 'The model server is rate limiting requests.' : 'The model server is overloaded.' }, Date.now() + (Number.isFinite(wait) && wait > 0 ? Math.min(wait, 300) : 30) * 1000)
+            markEngineDown(statusKey, { configured: true, connected: false, ...who, model: config.model, detail: res.status === 429 ? 'The model server is rate limiting requests.' : 'The model server is overloaded.' }, Date.now() + (Number.isFinite(wait) && wait > 0 ? Math.min(wait, 300) : 30) * 1000)
           }
           console.log(JSON.stringify({ event: 'model_error', engine: 'openai_compatible', status: res.status }))
           return null
@@ -286,7 +325,7 @@ type WorkersAIOutput = {
 export function workersAIEngine(ai: AiBinding, model?: string): Engine {
   const name = model?.trim() || WORKERS_AI_DEFAULT_MODEL
   const key = `workers-ai:${name}`
-  const up: ModelStatus = { configured: true, connected: true, engine: 'Workers AI', model: name }
+  const up: ModelStatus = { configured: true, connected: true, engine: 'Workers AI', model: name, hosted: true, provider: 'Cloudflare' }
 
   return {
     id: 'workers_ai',

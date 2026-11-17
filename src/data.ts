@@ -42,7 +42,7 @@ export const JOURNEY = [
 ]
 
 export const FEATURES = [
-  { title: 'A local agent that remembers', body: 'Free-form chat that reads and writes one company record, with every write validated. Runs on your own server.', status: 'Real' },
+  { title: 'A local agent that remembers', body: 'Free-form chat that reads and writes one company record, with every write validated. Use a hosted model or your own.', status: 'Real' },
   { title: 'Obligations that explain themselves', body: 'The rules engine returns the reason written from your own answers, plus the rule version.', status: 'Real' },
   { title: 'Calendar with authority and penalty', body: 'Monthly, quarterly, yearly and one-off deadlines for the next 12 months, with .ics export.', status: 'Real' },
   { title: 'Reminders until done', body: '30, 7, 3, 1 days before and on the day, then daily while overdue, with a simulated clock.', status: 'Real' },
@@ -56,7 +56,7 @@ export const FEATURES = [
 export const TRUST = [
   { title: 'Rules decide. AI talks.', body: 'Applicability, dates and penalties come from the versioned rules catalogue. The model only reads messy answers and explains records back in plain words.' },
   { title: 'Every result is explainable', body: 'Each obligation shows the answers that triggered it (“you have 12 people”) and the exact rule version behind it.' },
-  { title: 'Private by default', body: 'The app, the record and the rules run together. PAN, GSTIN, phone and email are masked before any model call, and logs store the masked text.' },
+  { title: 'Private by default', body: 'The record and the rules stay in the app. PAN, GSTIN, phone and email are masked before any model sees them, logs store only masked text, and you choose whether the model is hosted or runs on your own server.' },
   { title: 'Honest about uncertainty', body: 'Rules without a reviewer’s “verified on” date are marked not verified. When the tracker cannot answer, it says so and points you to a CA.' },
 ]
 

@@ -57,7 +57,7 @@ export function Home() {
               <span className="block text-violet">government.</span>
             </h1>
             <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-ink-2 sm:text-lg">
-              One agent keeps the record of your business on your own server. It works out every registration, licence and filing that applies, when each is due, what a missed deadline costs — drafts the paperwork — and keeps reminding you until it is done.
+              One agent keeps the record of your business. It works out every registration, licence and filing that applies, when each is due, what a missed deadline costs — drafts the paperwork — and keeps reminding you until it is done.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-2">
               {signedIn ? (

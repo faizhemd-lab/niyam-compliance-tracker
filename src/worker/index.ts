@@ -36,10 +36,11 @@ type Env = {
   CLERK_JWKS_URL?: string
   APP_ORIGIN?: string
   ENVIRONMENT?: string
-  /** Point these at a self-hosted Ollama, llama.cpp or vLLM server. */
+  /** An OpenAI-compatible model server: your own (Ollama, llama.cpp, vLLM) or hosted (Gemini). */
   MODEL_BASE_URL?: string
   MODEL_NAME?: string
   MODEL_API_KEY?: string
+  MODEL_LABEL?: string
   /** Worker secret for the hosted Claude engine (wrangler secret put ANTHROPIC_API_KEY). */
   ANTHROPIC_API_KEY?: string
   CLAUDE_MODEL?: string
