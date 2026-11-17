@@ -9,7 +9,9 @@ import { claudeEngine } from './claude'
  *
  * - `openAICompatibleEngine`: any server with an OpenAI-compatible chat API
  *   (Ollama, llama.cpp, vLLM), including a company's own model.
- * - `claudeEngine` (claude.ts): the hosted default.
+ * - `claudeEngine` (claude.ts): the hosted, paid engine.
+ * - `workersAIEngine`: Cloudflare Workers AI through the `AI` binding, the free
+ *   default (a daily free allowance on every Cloudflare account).
  * - when no engine is configured or reachable, the agent's deterministic brain
  *   answers instead (see agent.ts).
  */
@@ -66,7 +68,13 @@ export type ModelEnv = {
   ANTHROPIC_API_KEY?: string
   CLAUDE_MODEL?: string
   CLAUDE_EFFORT?: string
+  /** The Workers AI binding (wrangler.jsonc "ai"), and an optional model override. */
+  AI?: AiBinding
+  WORKERS_AI_MODEL?: string
 }
+
+/** The part of the Workers AI binding the engine uses. */
+export type AiBinding = { run(model: string, inputs: Record<string, unknown>): Promise<unknown> }
 
 export const BRAIN_STATUS: ModelStatus = { configured: false, connected: false, engine: 'on-server deterministic brain' }
 
@@ -76,7 +84,7 @@ const STATUS_TIMEOUT = 2_000
 const STATUS_TTL_OK = 60_000
 const STATUS_TTL_DOWN = 15_000
 
-const statusCache = new Map<string, { at: number; status: ModelStatus }>()
+const statusCache = new Map<string, { at: number; status: ModelStatus; until?: number }>()
 
 /** Tests and the "test connection" button need a fresh check. */
 export function clearEngineStatusCache() {
@@ -86,16 +94,24 @@ export function clearEngineStatusCache() {
 export async function cachedStatus(key: string, check: () => Promise<ModelStatus>): Promise<ModelStatus> {
   const hit = statusCache.get(key)
   const now = Date.now()
-  if (hit && now - hit.at < (hit.status.connected ? STATUS_TTL_OK : STATUS_TTL_DOWN)) return hit.status
+  if (hit?.until !== undefined) {
+    if (now < hit.until) return hit.status
+  } else if (hit && now - hit.at < (hit.status.connected ? STATUS_TTL_OK : STATUS_TTL_DOWN)) return hit.status
   const status = await check()
   statusCache.set(key, { at: now, status })
   return status
 }
 
+/** Record that an engine failed, so later turns skip it until `until` instead of failing again. */
+export function markEngineDown(key: string, status: ModelStatus, until: number) {
+  statusCache.set(key, { at: Date.now(), status: { ...status, connected: false }, until })
+}
+
 /**
  * Every engine this deployment is configured for, in the order they are tried:
- * a self-hosted model first, then Claude. The agent uses the first one that is
- * reachable; with none, the deterministic brain answers.
+ * a self-hosted model first, then Claude (when a key is set), then the free
+ * Workers AI model. The agent uses the first one that is reachable; with none,
+ * the deterministic brain answers.
  */
 export function enginesFor(env: ModelEnv): Engine[] {
   const engines: Engine[] = []
@@ -103,6 +119,7 @@ export function enginesFor(env: ModelEnv): Engine[] {
   if (baseUrl) engines.push(openAICompatibleEngine({ baseUrl, model: env.MODEL_NAME, apiKey: env.MODEL_API_KEY }))
   const key = env.ANTHROPIC_API_KEY?.trim()
   if (key) engines.push(claudeEngine({ apiKey: key, model: env.CLAUDE_MODEL, effort: env.CLAUDE_EFFORT }))
+  if (env.AI) engines.push(workersAIEngine(env.AI, env.WORKERS_AI_MODEL))
   return engines
 }
 
@@ -127,7 +144,7 @@ export async function engineStatus(env: ModelEnv): Promise<ModelStatus> {
 // ---------------------------------------------------------------------------
 // OpenAI-compatible servers (Ollama, llama.cpp, vLLM)
 
-type OpenAIMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string; tool_call_id?: string; tool_calls?: unknown }
+type OpenAIMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_call_id?: string; tool_calls?: unknown }
 
 function toOpenAIMessages(request: EngineRequest): OpenAIMessage[] {
   const out: OpenAIMessage[] = request.system.map((content) => ({ role: 'system', content }))
@@ -137,7 +154,8 @@ function toOpenAIMessages(request: EngineRequest): OpenAIMessage[] {
     else
       out.push({
         role: 'assistant',
-        content: turn.text,
+        // Some servers reject an empty string next to tool calls; null is the standard form.
+        content: turn.toolCalls?.length && !turn.text ? null : turn.text,
         ...(turn.toolCalls?.length
           ? { tool_calls: turn.toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })) }
           : {}),
@@ -211,6 +229,73 @@ export function openAICompatibleEngine(config: { baseUrl: string; model?: string
           toolCalls: (message.tool_calls ?? []).map((c, index) => ({ id: c.id ?? `call-${index}`, name: c.function?.name ?? '', args: parseToolArgs(c.function?.arguments) })),
         }
       } catch {
+        return null
+      }
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Workers AI (the free default)
+
+/**
+ * Picked by probing the catalogue's tool-calling models on the real binding:
+ * Llama 4 Scout called tools and answered from tool results reliably;
+ * GLM 4.7 Flash failed every tool-result round trip; Qwen3 30B ignored tools.
+ */
+export const WORKERS_AI_DEFAULT_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct'
+
+/** Errors that mean the daily free allowance (or a plan limit) is used up. */
+const ALLOWANCE_ERROR = /allocation|neuron|quota|limit|exceeded|429/i
+
+function nextUtcMidnight(now = Date.now()) {
+  const d = new Date(now)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)
+}
+
+type WorkersAIOutput = {
+  response?: string | null
+  tool_calls?: { name?: string; arguments?: unknown }[]
+  choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: unknown } }[] } }[]
+  usage?: { prompt_tokens?: number; completion_tokens?: number; neurons?: number }
+}
+
+export function workersAIEngine(ai: AiBinding, model?: string): Engine {
+  const name = model?.trim() || WORKERS_AI_DEFAULT_MODEL
+  const key = `workers-ai:${name}`
+  const up: ModelStatus = { configured: true, connected: true, engine: 'Workers AI', model: name }
+
+  return {
+    id: 'workers_ai',
+
+    // A status check would spend the free allowance, so the binding counts as
+    // up unless a recent call failed (see markEngineDown below).
+    status: () => cachedStatus(key, async () => up),
+
+    async step(request) {
+      try {
+        const out = (await ai.run(name, {
+          messages: toOpenAIMessages(request),
+          tools: request.tools.map((t) => ({ type: 'function', function: t })),
+          max_tokens: 1024,
+          temperature: 0.2,
+        })) as WorkersAIOutput
+        const usage = out.usage
+        console.log(JSON.stringify({ event: 'workers_ai_step', model: name, prompt_tokens: usage?.prompt_tokens ?? null, completion_tokens: usage?.completion_tokens ?? null, neurons: usage?.neurons ?? null }))
+
+        // Current models answer in the OpenAI shape; older ones put tool calls at the top level.
+        const message = out.choices?.[0]?.message
+        const openAICalls = (message?.tool_calls ?? []).map((c, index) => ({ id: c.id ?? `call-${index}`, name: c.function?.name ?? '', args: parseToolArgs(c.function?.arguments) }))
+        const legacyCalls = (out.tool_calls ?? []).map((c, index) => ({ id: `call-${index}`, name: c.name ?? '', args: parseToolArgs(c.arguments) }))
+        return { text: message?.content ?? out.response ?? '', toolCalls: openAICalls.length ? openAICalls : legacyCalls }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message.slice(0, 160) : 'Workers AI failed.'
+        if (ALLOWANCE_ERROR.test(detail)) {
+          markEngineDown(key, { ...up, detail: 'Today’s free Workers AI allowance is used up. It resets at 00:00 UTC.' }, nextUtcMidnight())
+        } else {
+          markEngineDown(key, { ...up, detail }, Date.now() + 30_000)
+        }
+        console.log(JSON.stringify({ event: 'workers_ai_error', model: name, allowance: ALLOWANCE_ERROR.test(detail) }))
         return null
       }
     },

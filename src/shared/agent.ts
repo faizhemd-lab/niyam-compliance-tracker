@@ -4,7 +4,7 @@ import { checklistFor, compileDeadline } from './documents'
 import { addDays, formatDate, plural } from './format'
 import { BRAIN_STATUS, enginesFor, engineStatus, type Engine, type ModelEnv, type ModelStatus, type ToolSpec, type Turn } from './engines'
 import { explain, maskIdentifiers } from './gateway'
-import { checkGrounding } from './grounding'
+import { checkGrounding, looksLikeToolSyntax, unbackedClaims } from './grounding'
 import {
   FIELDS,
   applyFacts,
@@ -125,7 +125,43 @@ function deadlines(ctx: Ctx): Deadline[] {
   return deadlinesFor(ctx.record, ctx.today)
 }
 
-function findDeadline(list: Deadline[], query: string): Deadline | undefined {
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const MONTH = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?'
+const DAY_MONTH = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?${MONTH}(?:,?\\s+(20\\d{2}))?`, 'g')
+const MONTH_DAY = new RegExp(`\\b${MONTH}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(20\\d{2}))?`, 'g')
+
+/**
+ * Dates a founder wrote: "20 October", "Oct 20", "20 Oct 2026", "2026-10-20",
+ * "20/10/2026". A bare month ("for October") is not a date: for GST it usually
+ * names the period, not the due date, so it is ignored rather than guessed.
+ */
+export function datesMentioned(text: string): { month: number; day: number; year?: number }[] {
+  const out: { month: number; day: number; year?: number }[] = []
+  const lower = text.toLowerCase()
+  for (const m of lower.matchAll(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/g)) out.push({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) })
+  for (const m of lower.matchAll(/\b(\d{1,2})[/.](\d{1,2})[/.](20\d{2})\b/g)) out.push({ day: Number(m[1]), month: Number(m[2]), year: Number(m[3]) })
+  for (const m of lower.matchAll(DAY_MONTH)) out.push({ day: Number(m[1]), month: MONTH_NAMES.indexOf(m[2]) + 1, ...(m[3] ? { year: Number(m[3]) } : {}) })
+  for (const m of lower.matchAll(MONTH_DAY)) out.push({ day: Number(m[2]), month: MONTH_NAMES.indexOf(m[1]) + 1, ...(m[3] ? { year: Number(m[3]) } : {}) })
+  return out.filter((d) => d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= 31)
+}
+
+/**
+ * Find the deadline a query names. When the query or the founder's message
+ * names a date, only deadlines due on that date can match: "the GSTR-3B due on
+ * 20 October" never resolves to the September one.
+ */
+function findDeadline(list: Deadline[], query: string, hint = ''): Deadline | undefined {
+  const dates = [...datesMentioned(query), ...datesMentioned(hint)]
+  if (dates.length) {
+    const onDate = list.filter((d) => {
+      if (!d.due_date) return false
+      const [y, m, day] = d.due_date.split('-').map(Number)
+      return dates.some((x) => x.month === m && x.day === day && (x.year === undefined || x.year === y))
+    })
+    if (!onDate.length) return undefined
+    if (onDate.length === 1) return onDate[0]
+    list = onDate
+  }
   const exact = list.find((d) => d.id === query || d.rule_id === query)
   if (exact) {
     // A rule id names many occurrences; prefer the nearest open one.
@@ -193,15 +229,17 @@ function runUpdate(ctx: Ctx, patch: Partial<Record<KnowledgeField, unknown>>, so
   if (result.changed.length) {
     ctx.record = logActivity(ctx.record, 'agent', 'Agent updated the record', result.changed.map((c) => `${c.label} → ${c.to}`).join(', '))
   }
+  // A partial save is a success: what was valid is stored, and the rejections are named.
+  const rejectedNote = result.errors.length ? ` (rejected ${result.errors.map((e) => e.key).join(', ')})` : ''
   call(
     ctx,
     'update_company',
     result.changed.length
-      ? `Updated ${result.changed.map((c) => `${c.label} to ${c.to}`).join(', ')}`
+      ? `Updated ${result.changed.map((c) => `${c.label} to ${c.to}`).join(', ')}${rejectedNote}`
       : result.errors.length
-        ? `Rejected ${plural(result.errors.length, 'value')}`
+        ? `Rejected ${plural(result.errors.length, 'value')}: ${result.errors.map((e) => e.key).join(', ')}`
         : 'No change',
-    result.errors.length === 0,
+    result.changed.length > 0 || result.errors.length === 0,
   )
   const saved = result.changed.map((c) => `${c.label}: ${c.to}`).join('; ')
   const rejected = result.errors.map((e) => `${e.key}: ${e.message}`).join('; ')
@@ -217,7 +255,7 @@ function runDraft(ctx: Ctx, args: { scope?: string; query?: string; item?: strin
   else if (args.scope === 'overdue') chosen = open.filter((d) => (d.days_left ?? 0) < 0)
   else if (args.scope === 'due_soon') chosen = open.filter((d) => d.due_date && (d.days_left ?? 99) <= 30).sort(byDue)
   else if (query) {
-    const match = findDeadline(open, query)
+    const match = findDeadline(open, query, ctx.message)
     if (match) chosen = [match]
   }
   if (!chosen.length) {
@@ -298,7 +336,7 @@ export function executeTool(ctx: Ctx, name: string, args: Record<string, unknown
       return `${s.total} deadlines, ${s.urgent} urgent, ${s.events} waiting on an event.\n${list.slice(0, limit).map(line).join('\n') || `Nothing ${filter}.`}`
     }
     case 'get_deadline': {
-      const deadline = findDeadline(deadlines(ctx), str('item'))
+      const deadline = findDeadline(deadlines(ctx), str('item'), ctx.message)
       if (!deadline) {
         call(ctx, 'get_deadline', 'No matching deadline', false)
         return 'No deadline matched that.'
@@ -317,7 +355,7 @@ export function executeTool(ctx: Ctx, name: string, args: Record<string, unknown
     }
     case 'explain_item': {
       const list = deadlines(ctx)
-      const deadline = findDeadline(list, str('item') || ctx.message) ?? list.find((d) => d.due_date)
+      const deadline = findDeadline(list, str('item') || ctx.message, ctx.message) ?? (datesMentioned(ctx.message).length ? undefined : list.find((d) => d.due_date))
       if (!deadline) {
         call(ctx, 'explain_item', 'Nothing to explain yet', false)
         return 'There is no calendar yet. Tell me about the business first.'
@@ -346,7 +384,12 @@ export function executeTool(ctx: Ctx, name: string, args: Record<string, unknown
         call(ctx, 'mark_done', 'Refused: the founder has not said it is filed', false)
         return 'Refused: only mark a filing done after the founder says it is filed or paid. Ask them.'
       }
-      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status !== 'done'), str('item') || ctx.message)
+      // One filing per message: a second mark_done is far more likely a guess than an instruction.
+      if (ctx.calls.some((c) => c.name === 'mark_done' && c.ok)) {
+        call(ctx, 'mark_done', 'Refused: one filing per message', false)
+        return 'Refused: only one filing can be marked done per message. Tell the founder which one you marked, and ask them to name any other filing separately.'
+      }
+      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status !== 'done'), str('item') || ctx.message, ctx.message)
       if (!deadline) {
         call(ctx, 'mark_done', 'No matching open deadline', false)
         return 'No open deadline matched that.'
@@ -360,7 +403,7 @@ export function executeTool(ctx: Ctx, name: string, args: Record<string, unknown
       return `${deadline.short} due ${formatDate(deadline.due_date)} is marked done; its reminders stop.`
     }
     case 'reopen': {
-      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status === 'done'), str('item') || ctx.message)
+      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status === 'done'), str('item') || ctx.message, ctx.message)
       if (!deadline) {
         call(ctx, 'reopen', 'No matching done deadline', false)
         return 'Nothing marked done matched that.'
@@ -372,7 +415,7 @@ export function executeTool(ctx: Ctx, name: string, args: Record<string, unknown
       return `${deadline.short} is open again and its reminders resume.`
     }
     case 'tick_document': {
-      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status !== 'done'), str('item'))
+      const deadline = findDeadline(deadlines(ctx).filter((d) => d.status !== 'done'), str('item'), ctx.message)
       const doc = findDoc(str('document'))
       if (!deadline || !doc || !deadline.documents.includes(doc)) {
         call(ctx, 'tick_document', 'No matching checklist item', false)
@@ -574,6 +617,10 @@ function brainReply(ctx: Ctx): string {
     return result.startsWith('No reminder') ? result : `Queued today’s reminders:\n${result}`
   }
   if (/\b(activity|history|what happened|audit|log)\b/.test(lower)) return `Latest activity:\n${executeTool(ctx, 'read_activity', { limit: 8 })}`
+  // "What happens if I miss X?" is a question about X, not a request for the overdue list.
+  if (/\bwhat happens\b|\bwhat if\b|\bif (i|we) (miss|skip|forget|am late|are late|don.?t file)\b|\bpenalt|\blate fee\b|\bfine for\b/.test(lower)) {
+    return executeTool(ctx, 'explain_item', { item: message, question: message })
+  }
   if (/\b(overdue|late|missed)\b/.test(lower)) return executeTool(ctx, 'get_calendar', { filter: 'overdue' })
   if (/\b(checklist|papers|which documents|what documents)\b/.test(lower)) return executeTool(ctx, 'get_deadline', { item: message })
   if (/\b(compiled|folders|my documents|list documents)\b/.test(lower)) return executeTool(ctx, 'list_documents', {})
@@ -826,7 +873,10 @@ export async function runAgent(input: AgentInput, env: ModelEnv, engines: Engine
   }
 
   if (reply) {
-    const check = checkGrounding(reply, sources)
+    const numbers = checkGrounding(reply, sources)
+    const claims = unbackedClaims(reply, ctx.calls)
+    const syntax = looksLikeToolSyntax(reply, TOOL_SPECS.map((t) => t.name))
+    const check = { grounded: numbers.grounded && !claims.length && !syntax, unsupported: [...numbers.unsupported, ...claims, ...(syntax ? ['tool syntax'] : [])] }
     if (check.grounded) return finishWith(reply, label)
     // An unsupported number: show what the tools did instead of the model's wording.
     if (ctx.calls.length) return finishWith(summary(), `${label} (checked)`, 'ungrounded', check.unsupported)

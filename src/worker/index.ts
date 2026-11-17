@@ -44,6 +44,9 @@ type Env = {
   ANTHROPIC_API_KEY?: string
   CLAUDE_MODEL?: string
   CLAUDE_EFFORT?: string
+  /** Workers AI binding: the free default engine. */
+  AI?: Ai
+  WORKERS_AI_MODEL?: string
 }
 
 type AppEnv = { Bindings: Env }

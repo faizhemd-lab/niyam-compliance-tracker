@@ -8,6 +8,10 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true
   },
+  // Workers AI: a free engine (daily free allowance). Off for now: in testing,
+  // the free models' replies failed the agent's checks on every turn and only
+  // made turns slower. To switch it on, uncomment the line below.
+  // "ai": { "binding": "AI" },
   "d1_databases": [
     {
       "binding": "DB",

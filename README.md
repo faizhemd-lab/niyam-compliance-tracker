@@ -112,7 +112,17 @@ approvals and grounding check; the first reachable one in this order answers:
    passed back unchanged within a turn, and server-side refusal fallbacks
    (`fallbacks: "default"`). Identifiers are masked before anything is sent;
    the rest of the record and the conversation go to Anthropic to answer.
-3. **On-server brain.** With no engine configured or reachable, a deterministic
+3. **Cloudflare Workers AI (free, off by default).** Uncomment the `ai` binding
+   in `wrangler.jsonc` to use `@cf/meta/llama-4-scout-17b-16e-instruct`
+   (override with `WORKERS_AI_MODEL`) on the account's daily free allowance.
+   Probing the catalogue's tool-calling models, Llama 4 Scout was the only one
+   that called tools and answered from their results reliably (GLM 4.7 Flash
+   failed the tool-result round trip, Qwen3 30B ignored tools, GPT-OSS 120B
+   failed on the second step). In a six-turn test every outcome was correct, but
+   only because the checks replaced each of its replies; turns took up to 30 s
+   and cost about 135 Neurons each (~70 turns a day free). When the allowance
+   runs out the engine is skipped until 00:00 UTC.
+4. **On-server brain.** With no engine configured or reachable, a deterministic
    brain in the Worker performs the same extraction, validation and tools. The
    app stays usable; the chat header says which engine is running.
 
@@ -205,6 +215,13 @@ If a rule changes on purpose, update its golden profile in the same commit.
   record or the conversation. Otherwise the founder sees a code-written summary
   of what the tools did (or the deterministic brain's answer), never the
   unchecked wording.
+- **Action claims are checked too**: a reply that says it drafted, marked done,
+  sent reminders, ran the autopilot or saved something needs a matching tool
+  call that succeeded; a reply that says it shared a link is never accepted
+  (sharing only waits for approval); tool calls written out as text are
+  rejected.
+- **One filing marked done per message**, and when the founder names a date
+  ("the GSTR-3B due on 20 October") only a deadline on that date can match.
 - **Hard limits per turn** (`LIMITS` in `agent.ts`): 6 model steps, 6 tool calls
   per step, 16 per turn; the same call twice in one turn runs once.
 - **Per-user message limits** (`takeAgentQuota` in `src/worker/db.ts`): 30 agent

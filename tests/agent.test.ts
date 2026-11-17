@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { LIMITS, runAgent, type AgentInput } from '../src/shared/agent'
+import { datesMentioned, LIMITS, runAgent, type AgentInput } from '../src/shared/agent'
 import { clearEngineStatusCache, engineFor, openAICompatibleEngine, type Engine, type EngineRequest, type EngineStep, type ModelStatus } from '../src/shared/engines'
 import { checkGrounding, numbersIn } from '../src/shared/grounding'
 import { applyFacts } from '../src/shared/knowledge'
@@ -222,6 +222,71 @@ describe('guardrails hold whichever model drives', () => {
     expect(result.proposed[0]).toMatchObject({ tool: 'create_share' })
   })
 
+  it('marks at most one filing done per message', async () => {
+    const { engine } = fakeEngine([
+      { text: '', toolCalls: [call('mark_done', { item: 'gstr3b@2026-10-20' }, 'a'), call('mark_done', { item: 'gstr3b@2026-09-20' }, 'b')] },
+      { text: 'Marked.', toolCalls: [] },
+    ])
+    const result = await runAgent(input('we filed the GSTR-3B for October'), {}, engine)
+    expect(Object.values(result.record.statuses).filter((s) => s.status === 'done')).toHaveLength(1)
+    expect(result.calls.map((c) => [c.name, c.ok])).toEqual([
+      ['mark_done', true],
+      ['mark_done', false],
+    ])
+  })
+
+  it('replaces a reply that claims actions no tool performed', async () => {
+    const { engine } = fakeEngine([
+      { text: '', toolCalls: [call('get_calendar', { filter: 'overdue' })] },
+      { text: 'I drafted the documents for it and reminders are set.', toolCalls: [] },
+    ])
+    const result = await runAgent(input('sort out what is overdue'), {}, engine)
+    expect(result.fallback).toBe('ungrounded')
+    expect(result.reply).not.toContain('drafted the documents')
+    expect(result.reply).toContain('Done:')
+  })
+
+  it('accepts an action claim that a tool backs', async () => {
+    const { engine } = fakeEngine([{ text: '', toolCalls: [call('draft_documents', { item: 'AGM' })] }, { text: 'I drafted the documents for the AGM.', toolCalls: [] }])
+    const result = await runAgent(input('draft the AGM papers'), {}, engine)
+    expect(result.fallback).toBeUndefined()
+    expect(result.reply).toBe('I drafted the documents for the AGM.')
+  })
+
+  it('never says a link was shared: sharing only waits for approval', async () => {
+    const { engine } = fakeEngine([{ text: '', toolCalls: [call('propose_share', {})] }, { text: 'I have shared your calendar with your CA.', toolCalls: [] }])
+    const result = await runAgent(input('share with my CA'), {}, engine)
+    expect(result.fallback).toBe('ungrounded')
+    expect(result.reply).toContain('Waiting for your approval')
+  })
+
+  it('treats tool calls written as text as a failed reply', async () => {
+    const { engine } = fakeEngine([{ text: '[run_autopilot, draft_documents(item="GSTR-3B")]', toolCalls: [] }])
+    const result = await runAgent(input('draft the GSTR-3B papers'), {}, engine)
+    expect(result.fallback).toBe('ungrounded')
+    expect(result.reply).not.toContain('draft_documents(')
+  })
+
+  it('marks the filing on the date the founder named, not the oldest open one', async () => {
+    const { engine } = fakeEngine([{ text: '', toolCalls: [call('mark_done', { item: 'GSTR-3B' })] }, { text: 'Noted.', toolCalls: [] }])
+    const result = await runAgent(input('We filed the GSTR-3B that was due on 20 October.'), {}, engine)
+    expect(Object.entries(result.record.statuses).filter(([, s]) => s.status === 'done').map(([id]) => id)).toEqual(['gstr3b@2026-10-20'])
+  })
+
+  it('refuses rather than guesses when no filing is due on the named date', async () => {
+    const { engine } = fakeEngine([{ text: '', toolCalls: [call('mark_done', { item: 'GSTR-3B' })] }, { text: 'Which one?', toolCalls: [] }])
+    const result = await runAgent(input('We filed the GSTR-3B due on 3 October.'), {}, engine)
+    expect(result.calls[0]).toMatchObject({ name: 'mark_done', ok: false })
+    expect(Object.keys(result.record.statuses)).toEqual([])
+  })
+
+  it('reports a partial save as a success that names what was rejected', async () => {
+    const { engine } = fakeEngine([{ text: '', toolCalls: [call('update_company', { facts: { employees: 25, entity: 'empire' } })] }, { text: 'Saved.', toolCalls: [] }])
+    const result = await runAgent(input('we now have 25 people and we are an empire'), {}, engine)
+    expect(result.calls[0].ok).toBe(true)
+    expect(result.calls[0].summary).toBe('Updated Employees to 25 (rejected entity)')
+  })
+
   it('validates facts the model tries to save', async () => {
     const { engine } = fakeEngine([{ text: '', toolCalls: [call('update_company', { facts: { employees: -4, entity: 'empire' } })] }, { text: 'Hmm.', toolCalls: [] }])
     const result = await runAgent(input('we have -4 people'), {}, engine)
@@ -234,6 +299,34 @@ describe('guardrails hold whichever model drives', () => {
     await runAgent(input('our PAN is ABCDE1234F and GSTIN 36ABCDE1234F1Z5, call 9876543210 or ceo@northwind.example'), {}, engine)
     const sent = JSON.stringify(requests)
     for (const secret of ['ABCDE1234F', '36ABCDE1234F1Z5', '9876543210', 'ceo@northwind.example']) expect(sent).not.toContain(secret)
+  })
+})
+
+describe('the deterministic brain', () => {
+  it('marks the filing on the date the founder named', async () => {
+    const result = await runAgent(input('We filed the GSTR-3B that was due on 20 October.'), {})
+    expect(Object.entries(result.record.statuses).filter(([, s]) => s.status === 'done').map(([id]) => id)).toEqual(['gstr3b@2026-10-20'])
+  })
+
+  it('answers "what happens if I miss" questions instead of asking for facts', async () => {
+    const result = await runAgent(input('What happens if I miss DIR-3 KYC?'), {})
+    expect(result.calls.map((c) => c.name)).toEqual(['explain_item'])
+    expect(result.reply).toContain('DIR-3 KYC')
+    expect(result.reply).toContain('₹5,000')
+  })
+})
+
+describe('dates in messages', () => {
+  it.each([
+    ['due on 20 October', [{ day: 20, month: 10 }]],
+    ['the 20th of Oct', [{ day: 20, month: 10 }]],
+    ['Oct 20, 2026', [{ day: 20, month: 10, year: 2026 }]],
+    ['on 2026-10-20', [{ year: 2026, month: 10, day: 20 }]],
+    ['on 20/10/2026', [{ day: 20, month: 10, year: 2026 }]],
+    ['the return for October', []],
+    ['12 people', []],
+  ])('"%s"', (text, expected) => {
+    expect(datesMentioned(text)).toEqual(expected)
   })
 })
 
